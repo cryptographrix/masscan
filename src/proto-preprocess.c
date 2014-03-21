@@ -116,6 +116,7 @@ parse_ipv4:
         info->ip_version = (px[offset]>>4)&0xF;
         info->ip_src = px+offset+12;
         info->ip_dst = px+offset+16;
+        info->ip_ttl = px[offset+8];
         info->ip_protocol = px[offset+9];
         info->ip_length = total_length;
         if (info->ip_version != 4)
@@ -175,7 +176,12 @@ parse_icmp:
 
 parse_sctp:
     {
-        VERIFY_REMAINING(4, FOUND_SCTP);
+        VERIFY_REMAINING(12, FOUND_SCTP);
+        info->port_src = ex16be(px+offset+0);
+        info->port_dst = ex16be(px+offset+2);
+        info->app_offset = offset + 12;
+        info->app_length = length - info->app_offset;
+        assert(info->app_length < 2000);
         return 1;
     }
 

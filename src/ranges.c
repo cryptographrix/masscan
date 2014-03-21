@@ -144,11 +144,11 @@ rangelist_add_range(struct RangeList *task, unsigned begin, unsigned end)
 /***************************************************************************
  ***************************************************************************/
 void
-rangelist_free(struct RangeList *list)
+rangelist_remove_all(struct RangeList *tasks)
 {
-    if (list->list) {
-        free(list->list);
-        memset(list, 0, sizeof(*list));
+    if (tasks->list) {
+        free(tasks->list);
+        memset(tasks, 0, sizeof(*tasks));
     }
 }
 
@@ -394,19 +394,20 @@ end:
  ***************************************************************************/
 uint64_t
 rangelist_exclude(  struct RangeList *targets,
-              const struct RangeList *excludes)
+                  const struct RangeList *excludes)
 {
     uint64_t count = 0;
     unsigned i;
-
+    
     for (i=0; i<excludes->count; i++) {
         struct Range range = excludes->list[i];
         count += range.end - range.begin + 1;
         rangelist_remove_range(targets, range.begin, range.end);
     }
-
+    
     return count;
 }
+
 
 /***************************************************************************
  ***************************************************************************/
@@ -581,8 +582,8 @@ regress_pick2()
         REGRESS(targets->count == duplicate->count);
         REGRESS(memcmp(targets->list, duplicate->list, targets->count*sizeof(targets->list[0])) == 0);
 
-        rangelist_free(targets);
-        rangelist_free(duplicate);
+        rangelist_remove_all(targets);
+        rangelist_remove_all(duplicate);
         rangelist_pick2_destroy(picker);
     }
 

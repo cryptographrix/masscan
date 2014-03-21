@@ -1,3 +1,10 @@
+/*
+
+    Parses DNS response information
+
+    The scanner sends a CHAOS TXT query for "version.bind". This module parses
+    DNS in order to find the response string.
+*/
 #include "proto-udp.h"
 #include "proto-dns.h"
 #include "proto-dns-parse.h"
@@ -344,7 +351,10 @@ dns_set_cookie(unsigned char *px, size_t length, uint64_t cookie)
  *    string for the banner.
  ***************************************************************************/
 unsigned
-handle_dns(struct Output *out, time_t timestamp, const unsigned char *px, unsigned length, struct PreprocessedInfo *parsed)
+handle_dns(struct Output *out, time_t timestamp,
+            const unsigned char *px, unsigned length, 
+            struct PreprocessedInfo *parsed,
+            uint64_t entropy)
 {
     unsigned ip_them;
     unsigned ip_me;
@@ -359,7 +369,7 @@ handle_dns(struct Output *out, time_t timestamp, const unsigned char *px, unsign
     ip_me = parsed->ip_dst[0]<<24 | parsed->ip_dst[1]<<16
             | parsed->ip_dst[2]<< 8 | parsed->ip_dst[3]<<0;
 
-    seqno = (unsigned)syn_cookie(ip_them, port_them | Templ_UDP, ip_me, port_me);
+    seqno = (unsigned)syn_cookie(ip_them, port_them | Templ_UDP, ip_me, port_me, entropy);
 
     proto_dns_parse(dns, px, parsed->app_offset, parsed->app_offset + parsed->app_length);
 
@@ -400,8 +410,10 @@ handle_dns(struct Output *out, time_t timestamp, const unsigned char *px, unsign
                 out, timestamp,
                 ip_them, 17, port_them,
                 PROTO_DNS_VERSIONBIND,
+                parsed->ip_ttl,
                 px + offset, txtlen);
     }
+
 
     return 0;
 }

@@ -82,7 +82,7 @@ parse_state_machine(struct Output *out, const unsigned char *px, size_t length)
     case PON:
     case PONG_CR:
     case PONG_CR_LF:
-        if ("PONG+"[i-P] == px[i]) {
+        if ("PONG+\r\n"[i-P] == px[i]) {
             state++;
             if (px[i] == '\n') {
                 out->redis.state = 0;
@@ -196,7 +196,7 @@ redis_out_close(struct Output *out, FILE *fp)
  ****************************************************************************/
 static void
 redis_out_status(struct Output *out, FILE *fp, time_t timestamp,
-    int status, unsigned ip, unsigned port, unsigned reason, unsigned ttl)
+    int status, unsigned ip, unsigned ip_proto, unsigned port, unsigned reason, unsigned ttl)
 {
     ptrdiff_t fd = (ptrdiff_t)fp;
     char line[1024];
@@ -210,7 +210,7 @@ redis_out_status(struct Output *out, FILE *fp, time_t timestamp,
         (unsigned char)(ip>>16),
         (unsigned char)(ip>> 8),
         (unsigned char)(ip>> 0));
-    sprintf_s(port_string, sizeof(port_string), "%u", port);
+    sprintf_s(port_string, sizeof(port_string), "%u/%s", port, name_from_ip_proto(ip_proto));
 
 /**3
 $3
@@ -296,8 +296,10 @@ myvalue
 static void
 redis_out_banner(struct Output *out, FILE *fp, time_t timestamp,
         unsigned ip, unsigned ip_proto, unsigned port,
-        enum ApplicationProtocol proto, const unsigned char *px, unsigned length)
+        enum ApplicationProtocol proto, unsigned ttl,
+        const unsigned char *px, unsigned length)
 {
+    UNUSEDPARM(ttl);
     UNUSEDPARM(timestamp);
     UNUSEDPARM(out);
     UNUSEDPARM(fp);

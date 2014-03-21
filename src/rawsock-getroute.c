@@ -76,6 +76,9 @@ hexdump(const void *v, size_t len)
 #endif
 
 void
+dump_rt_addresses(struct rt_msghdr *rtm);
+
+void
 dump_rt_addresses(struct rt_msghdr *rtm)
 {
     int i;
@@ -238,7 +241,7 @@ read_netlink(int fd, char *bufPtr, size_t sizeof_buffer, int seqNum, int pId)
         /* Check if the header is valid */
         if ((NLMSG_OK(nlHdr, readLen) == 0)
             || (nlHdr->nlmsg_type == NLMSG_ERROR)) {
-            perror("Error in recieved packet");
+            perror("Error in received packet");
             return -1;
         }
 
@@ -438,7 +441,8 @@ again:
         goto again;
     }
     if (err != NO_ERROR) {
-        fprintf(stderr, "GetAdaptersInfo failed with error: %u\n", err);
+        fprintf(stderr, "GetAdaptersInfo failed with error: %u\n", 
+                            (unsigned)err);
         return EFAULT;
     }
 

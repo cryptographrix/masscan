@@ -127,7 +127,10 @@ http_hello[] =      "GET / HTTP/1.0\r\n"
 
 /*****************************************************************************
  *****************************************************************************/
-static void
+void
+field_name(struct BannerOutput *banout, size_t id,
+           struct Patterns *xhttp_fields);
+void
 field_name(struct BannerOutput *banout, size_t id,
            struct Patterns *xhttp_fields)
 {
@@ -240,7 +243,6 @@ http_parse(
     id = (state>>8) & 0xFF;
     state = (state>>0) & 0xFF;
 
-
     for (i=0; i<length; i++)
     switch (state) {
     case 0: case 1: case 2: case 3: case 4:
@@ -344,19 +346,31 @@ http_parse(
         }
         break;
     case CONTENT:
+        {
+            unsigned next = i;
+
             id = smack_search_next(
                                    banner1->html_fields,
                                    &state2,
-                                   px, &i, (unsigned)length);
-            i--;
+                                   px, &next, (unsigned)length);
+
+            if (banner1->is_capture_html) {
+                banout_append(banout, PROTO_HTML_FULL, &px[i], next-i);
+            }
+
             if (id != SMACK_NOT_FOUND) {
-                //field_name(banout, id, html_fields);
-                //banout_append_char(banout, PROTO_HTML_TITLE, ':');
                 state = CONTENT_TAG;
             }
-            break;
+
+            i = next - 1;
+        }
+        break;
     case CONTENT_TAG:
         for (; i<length; i++) {
+            if (banner1->is_capture_html) {
+                banout_append_char(banout, PROTO_HTML_FULL, px[i]);
+            }
+
             if (px[i] == '>') {
                 state = CONTENT_FIELD;
                 break;
@@ -364,6 +378,9 @@ http_parse(
         }
         break;
     case CONTENT_FIELD:
+        if (banner1->is_capture_html) {
+            banout_append_char(banout, PROTO_HTML_FULL, px[i]);
+        }
         if (px[i] == '<')
             state = CONTENT;
         else {

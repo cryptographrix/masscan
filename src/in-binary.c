@@ -42,6 +42,26 @@ parse_status(struct Output *out,
     record.reason    = buf[10];
     record.ttl       = buf[11];
 
+    if (out->when_scan_started == 0)
+        out->when_scan_started = record.timestamp;
+
+    switch (record.port) {
+    case 53:
+    case 123:
+    case 137:
+    case 161: 
+        record.ip_proto = 17;
+        break;
+    case 36422:
+    case 36412:
+    case 2905:
+        record.ip_proto = 132;
+        break;
+    default:
+        record.ip_proto = 6;
+        break;
+    }
+
     /*
      * Now report the result
      */
@@ -49,11 +69,50 @@ parse_status(struct Output *out,
                     record.timestamp,
                     status,
                     record.ip,
+                    record.ip_proto,
                     record.port,
                     record.reason,
                     record.ttl);
 
 }
+
+/***************************************************************************
+ ***************************************************************************/
+static void
+parse_status2(struct Output *out,
+        enum PortStatus status, /* open/closed */
+        const unsigned char *buf, size_t buf_length)
+{
+    struct MasscanRecord record;
+
+    if (buf_length < 13)
+        return;
+
+    /* parse record */
+    record.timestamp = buf[0]<<24 | buf[1]<<16 | buf[2]<<8 | buf[3];
+    record.ip        = buf[4]<<24 | buf[5]<<16 | buf[6]<<8 | buf[7];
+    record.ip_proto  = buf[8];
+    record.port      = buf[9]<<8 | buf[10];
+    record.reason    = buf[11];
+    record.ttl       = buf[12];
+
+    if (out->when_scan_started == 0)
+        out->when_scan_started = record.timestamp;
+
+    /*
+     * Now report the result
+     */
+    output_report_status(out,
+                    record.timestamp,
+                    status,
+                    record.ip,
+                    record.ip_proto,
+                    record.port,
+                    record.reason,
+                    record.ttl);
+
+}
+
 
 /***************************************************************************
  * [OBSOLETE]
@@ -74,6 +133,8 @@ parse_banner3(struct Output *out, unsigned char *buf, size_t buf_length)
     record.port      = buf[8]<<8 | buf[9];
     record.app_proto = buf[10]<<8 | buf[11];
 
+    if (out->when_scan_started == 0)
+        out->when_scan_started = record.timestamp;
 
     /*
      * Now print the output
@@ -85,6 +146,7 @@ parse_banner3(struct Output *out, unsigned char *buf, size_t buf_length)
                 6, /* this is always TCP */
                 record.port,
                 record.app_proto,
+                0, /* ttl */
                 buf+12, (unsigned)buf_length-12
                 );
 }
@@ -98,6 +160,9 @@ parse_banner4(struct Output *out, unsigned char *buf, size_t buf_length)
 {
     struct MasscanRecord record;
 
+    if (buf_length < 13)
+        return;
+
     /*
      * Parse the parts that are common to most records
      */
@@ -106,6 +171,9 @@ parse_banner4(struct Output *out, unsigned char *buf, size_t buf_length)
     record.ip_proto  = buf[8];
     record.port      = buf[9]<<8 | buf[10];
     record.app_proto = buf[11]<<8 | buf[12];
+
+    if (out->when_scan_started == 0)
+        out->when_scan_started = record.timestamp;
 
     /*
      * Now print the output
@@ -117,7 +185,46 @@ parse_banner4(struct Output *out, unsigned char *buf, size_t buf_length)
                 record.ip_proto,    /* TCP=6, UDP=17 */
                 record.port,
                 record.app_proto,   /* HTTP, SSL, SNMP, etc. */
+                0, /* ttl */
                 buf+13, (unsigned)buf_length-13
+                );
+}
+
+/***************************************************************************
+ ***************************************************************************/
+static void
+parse_banner9(struct Output *out, unsigned char *buf, size_t buf_length)
+{
+    struct MasscanRecord record;
+
+    if (buf_length < 14)
+        return;
+
+    /*
+     * Parse the parts that are common to most records
+     */
+    record.timestamp = buf[0]<<24 | buf[1]<<16 | buf[2]<<8 | buf[3];
+    record.ip        = buf[4]<<24 | buf[5]<<16 | buf[6]<<8 | buf[7];
+    record.ip_proto  = buf[8];
+    record.port      = buf[9]<<8 | buf[10];
+    record.app_proto = buf[11]<<8 | buf[12];
+    record.ttl       = buf[13];
+
+    if (out->when_scan_started == 0)
+        out->when_scan_started = record.timestamp;
+
+    /*
+     * Now print the output
+     */
+    output_report_banner(
+                out,
+                record.timestamp,
+                record.ip,
+                record.ip_proto,    /* TCP=6, UDP=17 */
+                record.port,
+                record.app_proto,   /* HTTP, SSL, SNMP, etc. */
+                record.ttl, /* ttl */
+                buf+13, (unsigned)buf_length-14
                 );
 }
 
@@ -160,6 +267,27 @@ parse_file(struct Output *out, const char *filename)
                 "%s: unknown file format (expeced \"masscan/1.1\")\n",
                 filename);
         goto end;
+    }
+
+    /*
+     * Look for start time
+     */
+    if (buf[11] == '.' && strtoul((char*)buf+12,0,0) >= 2) {
+        unsigned i;
+
+        /* move to next field */
+        for (i=0; i<'a' && buf[i] && buf[i] != '\n'; i++)
+            ;
+        i++;
+
+        if (buf[i] == 's')
+            i++;
+        if (buf[i] == ':')
+            i++;
+
+        /* extract timestamp */
+        if (i < 'a')
+            out->when_scan_started = strtoul((char*)buf+i,0,0);
     }
 
     /* Now read all records */
@@ -211,10 +339,10 @@ parse_file(struct Output *out, const char *filename)
         /* Depending on record type, do something different */
         switch (type) {
             case 1: /* STATUS: open */
-                parse_status(out, Port_Open, buf, bytes_read);
+                parse_status(out, PortStatus_Open, buf, bytes_read);
                 break;
             case 2: /* STATUS: closed */
-                parse_status(out, Port_Closed, buf, bytes_read);
+                parse_status(out, PortStatus_Closed, buf, bytes_read);
                 break;
             case 3: /* BANNER */
                 parse_banner3(out, buf, bytes_read);
@@ -230,6 +358,15 @@ parse_file(struct Output *out, const char *filename)
             case 5:
                 parse_banner4(out, buf, bytes_read);
                 break;
+            case 6: /* STATUS: open */
+                parse_status2(out, PortStatus_Open, buf, bytes_read);
+                break;
+            case 7: /* STATUS: closed */
+                parse_status2(out, PortStatus_Closed, buf, bytes_read);
+                break;
+            case 9:
+                parse_banner9(out, buf, bytes_read);
+                break;
             case 'm': /* FILEHEADER */
                 //goto end;
                 break;
@@ -239,7 +376,7 @@ parse_file(struct Output *out, const char *filename)
         }
         total_records++;
         if ((total_records & 0xFFFF) == 0)
-            fprintf(stderr, "%s: %8llu\r", filename, total_records);
+            fprintf(stderr, "%s: %8" PRIu64 "\r", filename, total_records);
     }
 
 end:
@@ -265,6 +402,12 @@ convert_binary_files(struct Masscan *masscan,
     int i;
 
     out = output_create(masscan, 0);
+    
+    /*
+     * Set the start time to zero. We'll read it from the first file
+     * that we parse
+     */
+    out->when_scan_started = 0;
 
     /*
      * We don't parse the entire argument list, just a subrange

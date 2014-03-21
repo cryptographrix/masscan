@@ -170,7 +170,8 @@ generate_getL(unsigned char *out_buf, size_t out_buf_len, unsigned xrand)
 unsigned
 handle_zeroaccess(  struct Output *out, time_t timestamp,
                     const unsigned char *px, unsigned length,
-                    struct PreprocessedInfo *parsed)
+                    struct PreprocessedInfo *parsed,
+                    uint64_t entropy)
 {
     unsigned char buf[2048];
     unsigned len;
@@ -183,6 +184,7 @@ handle_zeroaccess(  struct Output *out, time_t timestamp,
     banout->next = 0;
     banout->protocol = PROTO_UDP_ZEROACCESS;
 
+    UNUSEDPARM(entropy);
     UNUSEDPARM(px);
     UNUSEDPARM(length);
     UNUSEDPARM(port_me);
@@ -254,6 +256,7 @@ handle_zeroaccess(  struct Output *out, time_t timestamp,
             out, timestamp,
             ip_them, 17, port_them,
             PROTO_UDP_ZEROACCESS,
+            parsed->ip_ttl,
             banout_string(banout, PROTO_UDP_ZEROACCESS),
             banout_string_length(banout, PROTO_UDP_ZEROACCESS));
 

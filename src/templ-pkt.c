@@ -10,13 +10,14 @@
 #include "templ-pkt.h"
 #include "templ-port.h"
 #include "proto-preprocess.h"
+#include "proto-sctp.h"
 #include "string_s.h"
 #include "pixie-timer.h"
-#include "proto-preprocess.h"
 #include "logger.h"
 #include "templ-payloads.h"
 #include "syn-cookie.h"
 #include "unusedparm.h"
+#include "script.h"
 
 #include <assert.h>
 #include <string.h>
@@ -42,9 +43,10 @@ static unsigned char default_tcp_template[] =
     "\0\0\0\0"      /* ack number */
     "\x50"          /* header length */
     "\x02"          /* SYN */
-    "\x0\x0"        /* window */
+    "\x04\x0"        /* window fixed to 1024 */
     "\xFF\xFF"      /* checksum */
     "\x00\x00"      /* urgent pointer */
+    "\x02\x04\x05\xb4"  /* added options [mss 1460] */
 ;
 
 static unsigned char default_udp_template[] =
@@ -73,18 +75,26 @@ static unsigned char default_sctp_template[] =
     "\x08\x00"      /* Ethernet type: IPv4 */
     "\x45"          /* IP type */
     "\x00"
-    "\x00\x1c"      /* total length = 40 bytes */
+    "\x00\x34"      /* total length = 52 bytes */
     "\x00\x00"      /* identification */
     "\x00\x00"      /* fragmentation flags */
-    "\xFF\x11"      /* TTL=255, proto=UDP */
-    "\xFF\xFF"      /* checksum */
+    "\xFF\x84"      /* TTL=255, proto = SCTP */
+    "\x00\x00"      /* checksum */
     "\0\0\0\0"      /* source address */
     "\0\0\0\0"      /* destination address */
 
-    "\xfe\xdc"      /* source port */
-    "\0\0"          /* destination port */
-    "\0\0\0\0"      /* checksum */
-    "\0\0\0\0"      /* length */
+    "\x00\x00"          /* source port */
+    "\x00\x00"          /* destination port */
+    "\x00\x00\x00\x00"  /* verification tag */
+    "\x58\xe4\x5d\x36"  /* checksum */
+    "\x01"              /* type = init */
+    "\x00"              /* flags = none */
+    "\x00\x14"          /* length = 20 */
+    "\x9e\x8d\x52\x25"  /* initiate tag */
+    "\x00\x00\x80\x00"  /* receiver window credit */
+    "\x00\x0a"          /* outbound streams = 10 */
+    "\x08\x00"          /* inbound streams = 2048 */
+    "\x46\x1a\xdf\x3d"  /* initial TSN */
 ;
 
 
@@ -169,7 +179,7 @@ static unsigned char default_arp_template[] =
 static unsigned
 ip_header_checksum(const unsigned char *px, unsigned offset, unsigned max_offset)
 {
-    unsigned header_length = (px[offset]>>2)&0xFC;
+    unsigned header_length = (px[offset]&0xF) * 4;
     unsigned xsum = 0;
     unsigned i;
 
@@ -255,7 +265,7 @@ tcp_checksum(struct TemplatePacket *tmpl)
 
 /***************************************************************************
  ***************************************************************************/
-static unsigned
+unsigned
 udp_checksum2(const unsigned char *px, unsigned offset_ip,
               unsigned offset_tcp, size_t tcp_length)
 {
@@ -481,22 +491,29 @@ udp_payload_fixup(struct TemplatePacket *tmpl, unsigned port, unsigned seqno)
 
 
 /***************************************************************************
- * Here we take a packet template, parse it, then make it easier to work
- * with.
+ * This is the function that formats the transmitted packets for probing
+ * machines. It takes a template for the protocol (usually a TCP SYN
+ * packet), then sets the destination IP address and port numbers.
  ***************************************************************************/
 void
 template_set_target(
     struct TemplateSet *tmplset,
     unsigned ip_them, unsigned port_them,
     unsigned ip_me, unsigned port_me,
-    unsigned seqno)
+    unsigned seqno,
+    unsigned char *px, size_t sizeof_px, size_t *r_length
+    )
 {
-    unsigned char *px;
     unsigned offset_ip;
     unsigned offset_tcp;
     uint64_t xsum;
     unsigned ip_id;
     struct TemplatePacket *tmpl = NULL;
+    unsigned xsum2;
+    uint64_t entropy = tmplset->entropy;
+    //unsigned xsum3;
+    
+    *r_length = sizeof_px;
 
     /*
      * Find out which packet template to use. This is because we can
@@ -519,7 +536,10 @@ template_set_target(
         tmpl = &tmplset->pkts[Proto_ICMP_timestamp];
     } else if (port_them == Templ_ARP) {
         tmpl = &tmplset->pkts[Proto_ARP];
-        px = tmpl->packet + tmpl->offset_ip;
+        if (*r_length > tmpl->length)
+            *r_length = tmpl->length;
+        memcpy(px, tmpl->packet, *r_length);
+        px = px + tmpl->offset_ip;
         px[14] = (unsigned char)((ip_me >> 24) & 0xFF);
         px[15] = (unsigned char)((ip_me >> 16) & 0xFF);
         px[16] = (unsigned char)((ip_me >>  8) & 0xFF);
@@ -528,15 +548,18 @@ template_set_target(
         px[25] = (unsigned char)((ip_them >> 16) & 0xFF);
         px[26] = (unsigned char)((ip_them >>  8) & 0xFF);
         px[27] = (unsigned char)((ip_them >>  0) & 0xFF);
-        tmplset->px = tmpl->packet;
-        tmplset->length = tmpl->length;
         return;
+    } else if (port_them == Templ_Script) {
+        tmpl = &tmplset->pkts[Proto_Script];
+        port_them &= 0xFFFF;
     } else {
         return;
     }
 
     /* Create some shorter local variables to work with */
-    px = tmpl->packet;
+    if (*r_length > tmpl->length)
+        *r_length = tmpl->length;
+    memcpy(px, tmpl->packet, *r_length);
     offset_ip = tmpl->offset_ip;
     offset_tcp = tmpl->offset_tcp;
     ip_id = ip_them ^ port_them ^ seqno;
@@ -562,29 +585,34 @@ template_set_target(
     px[offset_ip+19] = (unsigned char)((ip_them >>  0) & 0xFF);
 
 
-    xsum = tmpl->checksum_ip;
+    /*xsum = tmpl->checksum_ip;
     xsum += tmpl->length - tmpl->offset_app;
     xsum += (ip_id&0xFFFF);
     xsum += ip_them;
     xsum += ip_me;
     xsum = (xsum >> 16) + (xsum & 0xFFFF);
     xsum = (xsum >> 16) + (xsum & 0xFFFF);
-    xsum = ~xsum;
+    xsum = ~xsum;*/
 
-#if 0
-    xsum = *(unsigned*)&px[offset_ip+0];
-    xsum += *(unsigned*)&px[offset_ip+4];
-    xsum += *(unsigned*)&px[offset_ip+8];
-    xsum += *(unsigned*)&px[offset_ip+12];
-    xsum += *(unsigned*)&px[offset_ip+16];
-    xsum = (xsum >> 16) + (xsum & 0xFFFF);
-    xsum = (xsum >> 16) + (xsum & 0xFFFF);
-    xsum = (xsum >> 16) + (xsum & 0xFFFF);
-    xsum = ~xsum;
-#endif
+    px[offset_ip+10] = (unsigned char)(0);
+    px[offset_ip+11] = (unsigned char)(0);
 
-    px[offset_ip+10] = (unsigned char)(xsum >> 8);
-    px[offset_ip+11] = (unsigned char)(xsum & 0xFF);
+    xsum2 = (unsigned)~ip_header_checksum(px, offset_ip, tmpl->length);
+
+
+    /*xsum3 = *(unsigned*)&px[offset_ip+0];
+    xsum3 += *(unsigned*)&px[offset_ip+4];
+    xsum3 += *(unsigned*)&px[offset_ip+8];
+    xsum3 += *(unsigned*)&px[offset_ip+12];
+    xsum3 += *(unsigned*)&px[offset_ip+16];
+    xsum3 = (xsum3 >> 16) + (xsum3 & 0xFFFF);
+    xsum3 = (xsum3 >> 16) + (xsum3 & 0xFFFF);
+    xsum3 = (xsum3 >> 16) + (xsum3 & 0xFFFF);
+    xsum3 = (~xsum3) & 0xFFFF;*/
+
+
+    px[offset_ip+10] = (unsigned char)(xsum2 >> 8);
+    px[offset_ip+11] = (unsigned char)(xsum2 & 0xFF);
 
 
     /*
@@ -626,7 +654,7 @@ template_set_target(
 
         px[offset_tcp+6] = (unsigned char)(0);
         px[offset_tcp+7] = (unsigned char)(0);
-        xsum = udp_checksum(tmpl);
+        xsum = udp_checksum2(px, offset_ip, offset_tcp, tmpl->length - offset_tcp);
         /*xsum += (uint64_t)tmpl->checksum_tcp
                 + (uint64_t)ip_me
                 + (uint64_t)ip_them
@@ -642,10 +670,25 @@ template_set_target(
         px[offset_tcp+7] = (unsigned char)(xsum >>  0);
         break;
     case Proto_SCTP:
+        px[offset_tcp+ 0] = (unsigned char)(port_me >> 8);
+        px[offset_tcp+ 1] = (unsigned char)(port_me & 0xFF);
+        px[offset_tcp+ 2] = (unsigned char)(port_them >> 8);
+        px[offset_tcp+ 3] = (unsigned char)(port_them & 0xFF);
+
+        px[offset_tcp+16] = (unsigned char)(seqno >> 24);
+        px[offset_tcp+17] = (unsigned char)(seqno >> 16);
+        px[offset_tcp+18] = (unsigned char)(seqno >>  8);
+        px[offset_tcp+19] = (unsigned char)(seqno >>  0);
+
+        xsum = sctp_checksum(px + offset_tcp, tmpl->length - offset_tcp);
+        px[offset_tcp+ 8] = (unsigned char)(xsum >>  24);
+        px[offset_tcp+ 9] = (unsigned char)(xsum >>  16);
+        px[offset_tcp+10] = (unsigned char)(xsum >>   8);
+        px[offset_tcp+11] = (unsigned char)(xsum >>   0);
         break;
     case Proto_ICMP_ping:
     case Proto_ICMP_timestamp:
-            seqno = (unsigned)syn_cookie(ip_them, port_them, ip_me, 0);
+            seqno = (unsigned)syn_cookie(ip_them, port_them, ip_me, 0, entropy);
             px[offset_tcp+ 4] = (unsigned char)(seqno >> 24);
             px[offset_tcp+ 5] = (unsigned char)(seqno >> 16);
             px[offset_tcp+ 6] = (unsigned char)(seqno >>  8);
@@ -659,13 +702,19 @@ template_set_target(
             px[offset_tcp+2] = (unsigned char)(xsum >>  8);
             px[offset_tcp+3] = (unsigned char)(xsum >>  0);
         break;
+    case Proto_Script:
+            tmplset->script->set_target(tmpl,
+                                     ip_them, port_them,
+                                     ip_me, port_me,
+                                     seqno,
+                                     px, sizeof_px, r_length);
+            break;
     case Proto_ARP:
         /* don't do any checksumming */
         break;
+    case Proto_Count:
+        break;
     }
-
-    tmplset->px = tmpl->packet;
-    tmplset->length = tmpl->length;
 }
 
 
@@ -788,6 +837,12 @@ _template_init(
         tmpl->checksum_tcp = udp_checksum(tmpl);
         tmpl->proto = Proto_UDP;
         break;
+    case 132: /* SCTP */
+        tmpl->checksum_tcp = sctp_checksum(
+                                    tmpl->packet + tmpl->offset_tcp,
+                                    tmpl->length - tmpl->offset_tcp);
+        tmpl->proto = Proto_SCTP;
+        break;
     }
 
     /*
@@ -816,9 +871,11 @@ template_packet_init(
     const unsigned char *source_mac,
     const unsigned char *router_mac,
     struct NmapPayloads *payloads,
-    int data_link)
+    int data_link,
+    uint64_t entropy)
 {
     templset->count = 0;
+    templset->entropy = entropy;
 
     /* [TCP] */
     _template_init(&templset->pkts[Proto_TCP],
@@ -868,6 +925,16 @@ template_packet_init(
                     sizeof(default_arp_template)-1,
                     data_link);
     templset->count++;
+
+    /* [Script] */
+    if (templset->script) {
+        _template_init( &templset->pkts[Proto_Script],
+                       source_mac, router_mac,
+                       templset->script->packet,
+                       templset->script->packet_length,
+                       data_link);
+        templset->count++;
+    }
 }
 
 /***************************************************************************
@@ -948,12 +1015,14 @@ template_selftest(void)
     struct TemplateSet tmplset[1];
     int failures = 0;
 
+    memset(tmplset, 0, sizeof(tmplset[0]));
     template_packet_init(
             tmplset,
             (const unsigned char*)"\x00\x11\x22\x33\x44\x55",
             (const unsigned char*)"\x66\x55\x44\x33\x22\x11",
             0,
-            1 /*Ethernet*/
+            1,  /* Ethernet */
+            0   /* no entropy */
             );
     failures += tmplset->pkts[Proto_TCP].proto  != Proto_TCP;
     failures += tmplset->pkts[Proto_UDP].proto  != Proto_UDP;

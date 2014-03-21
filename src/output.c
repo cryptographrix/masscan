@@ -43,21 +43,19 @@
 #include <string.h>
 
 
-
 /*****************************************************************************
  * The 'status' variable contains both the open/closed info as well as the
  * protocol info. This splits it back out into two values.
  *****************************************************************************/
 const char *
-proto_from_status(unsigned status)
+name_from_ip_proto(unsigned ip_proto)
 {
-    switch (status) {
-        case Port_Open: return "tcp";
-        case Port_Closed: return "tcp";
-        case Port_IcmpEchoResponse: return "icmp";
-        case Port_UdpOpen: return "udp";
-        case Port_UdpClosed: return "udp";
-        case Port_ArpOpen: return "arp";
+    switch (ip_proto) {
+        case 0: return "arp";
+        case 1: return "icmp";
+        case 6: return "tcp";
+        case 17: return "udp";
+        case 132: return "sctp";
         default: return "err";
     }
 }
@@ -69,15 +67,12 @@ proto_from_status(unsigned status)
  * string based on the narrow variable.
  *****************************************************************************/
 const char *
-status_string(int x)
+status_string(enum PortStatus status)
 {
-    switch (x) {
-        case Port_Open: return "open";
-        case Port_Closed: return "closed";
-        case Port_UdpOpen: return "open";
-        case Port_UdpClosed: return "closed";
-        case Port_IcmpEchoResponse: return "open";
-        case Port_ArpOpen: return "open";
+    switch (status) {
+        case PortStatus_Open: return "open";
+        case PortStatus_Closed: return "closed";
+        case PortStatus_Arp: return "up";
         default: return "unknown";
     }
 }
@@ -122,7 +117,7 @@ normalize_string(const unsigned char *px, size_t length,
     for (i=0; i<length; i++) {
         unsigned char c = px[i];
 
-        if (isprint(c) && c != '<' && c != '>' && c != '&' && c != '\\') {
+        if (isprint(c) && c != '<' && c != '>' && c != '&' && c != '\\' && c != '\"' && c != '\'') {
             if (offset + 2 < buf_len)
                 buf[offset++] = px[i];
         } else {
@@ -151,7 +146,7 @@ normalize_string(const unsigned char *px, size_t length,
 static FILE *
 open_rotate(struct Output *out, const char *filename)
 {
-    FILE *fp;
+    FILE *fp = 0;
     unsigned is_append = out->is_append;
     int x;
 
@@ -182,22 +177,29 @@ open_rotate(struct Output *out, const char *filename)
         return (FILE*)fd;
     }
 
+    /* Do something special for the "-" filename */
+    if (filename[0] == '-' && filename[1] == '\0')
+        fp = stdout;
+
     /* open a "shareable" file. On Windows, by default files can't be renamed
      * while they are open, so we need a special function that takes care
      * of this. */
-    x = pixie_fopen_shareable(&fp, filename, is_append);
-    if (x != 0 || fp == NULL) {
-        fprintf(stderr, "out: could not open file for %s\n",
-                is_append?"appending":"writing");
-        perror(filename);
-        control_c_pressed = 1;
-        return NULL;
+    if (fp == 0) {
+        x = pixie_fopen_shareable(&fp, filename, is_append);
+        if (x != 0 || fp == NULL) {
+            fprintf(stderr, "out: could not open file for %s\n",
+                    is_append?"appending":"writing");
+            perror(filename);
+            control_c_pressed = 1;
+            return NULL;
+        }
     }
 
     /*
-     * Write the format-specific headers, like <xml>
+     * Mark the file as newly opened. That way, before writing any data
+     * to it, we'll first have to write headers
      */
-    out->funcs->open(out, fp);
+    out->is_virgin_file = 1;
 
     return fp;
 }
@@ -219,7 +221,8 @@ close_rotate(struct Output *out, FILE *fp)
     /*
      * Write the format-specific trailers, like </xml>
      */
-    out->funcs->close(out, fp);
+    if (!out->is_virgin_file)
+        out->funcs->close(out, fp);
 
     memset(&out->counts, 0, sizeof(out->counts));
 
@@ -365,25 +368,31 @@ output_create(const struct Masscan *masscan, unsigned thread_index)
     if (out == NULL)
         return NULL;
     memset(out, 0, sizeof(*out));
+    out->masscan = masscan;
+    out->when_scan_started = time(0);
+    out->is_virgin_file = 1;
 
     /*
      * Copy the configuration information from the 'masscan' structure.
      */
-    out->rotate.period = masscan->rotate_output;
-    out->rotate.offset = masscan->rotate_offset;
+    out->rotate.period = masscan->output.rotate.timeout;
+    out->rotate.offset = masscan->output.rotate.offset;
+    out->rotate.filesize = masscan->output.rotate.filesize;
     out->redis.port = masscan->redis.port;
     out->redis.ip = masscan->redis.ip;
     out->is_banner = masscan->is_banners;
     out->is_gmt = masscan->is_gmt;
-    out->is_interactive = masscan->is_interactive;
-    out->is_open_only = masscan->nmap.open_only;
-    out->is_append = masscan->nmap.append;
-    out->xml.stylesheet = duplicate_string(masscan->nmap.stylesheet);
-    out->rotate.directory = duplicate_string(masscan->rotate_directory);
+    out->is_interactive = masscan->output.is_interactive;
+    out->is_show_open = masscan->output.is_show_open;
+    out->is_show_closed = masscan->output.is_show_closed;
+    out->is_show_host = masscan->output.is_show_host;
+    out->is_append = masscan->output.is_append;
+    out->xml.stylesheet = duplicate_string(masscan->output.stylesheet);
+    out->rotate.directory = duplicate_string(masscan->output.rotate.directory);
     if (masscan->nic_count <= 1)
-        out->filename = duplicate_string(masscan->nmap.filename);
+        out->filename = duplicate_string(masscan->output.filename);
     else
-        out->filename = indexed_filename(masscan->nmap.filename, thread_index);
+        out->filename = indexed_filename(masscan->output.filename, thread_index);
 
     for (i=0; i<8; i++) {
         out->src[i] = masscan->nic[i].src;
@@ -393,7 +402,7 @@ output_create(const struct Masscan *masscan, unsigned thread_index)
      * Link the appropriate output module.
      * TODO: support multiple output modules
      */
-    out->format = masscan->nmap.format;
+    out->format = masscan->output.format;
     switch (out->format) {
     case Output_List:
         out->funcs = &text_output;
@@ -403,6 +412,9 @@ output_create(const struct Masscan *masscan, unsigned thread_index)
         break;
     case Output_Binary:
         out->funcs = &binary_output;
+        break;
+    case Output_Grepable:
+        out->funcs = &grepable_output;
         break;
     case Output_Redis:
         out->funcs = &redis_output;
@@ -420,12 +432,12 @@ output_create(const struct Masscan *masscan, unsigned thread_index)
      * so that we can immediately notify the user of an error, rather than
      * waiting midway through a long scan and have it fail.
      */
-    if (masscan->nmap.filename[0] && out->funcs != &null_output) {
+    if (masscan->output.filename[0] && out->funcs != &null_output) {
         FILE *fp;
 
-        fp = open_rotate(out, masscan->nmap.filename);
+        fp = open_rotate(out, masscan->output.filename);
         if (fp == NULL) {
-            perror(masscan->nmap.filename);
+            perror(masscan->output.filename);
             exit(1);
         }
 
@@ -438,7 +450,7 @@ output_create(const struct Masscan *masscan, unsigned thread_index)
      * this time will be set at "infinity" in the future.
      * TODO: this code isn't Y2036 compliant.
      */
-    if (masscan->rotate_output == 0) {
+    if (masscan->output.rotate.timeout == 0) {
         /* TODO: how does one find the max time_t value??*/
         out->rotate.next = (time_t)LONG_MAX;
     } else {
@@ -555,8 +567,12 @@ again:
      * Set the next rotate time, which is the current time plus the period
      * length
      */
-    out->rotate.next = next_rotate_time(time(0),
+    out->rotate.bytes_written = 0;
+
+    if (out->rotate.period) {
+        out->rotate.next = next_rotate_time(time(0),
                                         out->rotate.period, out->rotate.offset);
+    }
 
     LOG(1, "rotated: %s\n", new_filename);
     free(new_filename);
@@ -582,6 +598,21 @@ again:
     return out->fp;
 }
 
+/***************************************************************************
+ ***************************************************************************/
+static int
+is_rotate_time(const struct Output *out, time_t now)
+{
+    if (out->is_virgin_file)
+        return 0;
+    if (now >= out->rotate.next)
+        return 1;
+    if (out->rotate.filesize != 0 &&
+        out->rotate.bytes_written >= out->rotate.filesize)
+        return 1;
+    return 0;
+}
+
 
 /***************************************************************************
  * Report simply "open" or "closed", with little additional information.
@@ -590,7 +621,7 @@ again:
  ***************************************************************************/
 void
 output_report_status(struct Output *out, time_t timestamp, int status,
-        unsigned ip, unsigned port, unsigned reason, unsigned ttl)
+        unsigned ip, unsigned ip_proto, unsigned port, unsigned reason, unsigned ttl)
 {
     FILE *fp = out->fp;
     time_t now = time(0);
@@ -599,29 +630,20 @@ output_report_status(struct Output *out, time_t timestamp, int status,
 
     /* if "--open"/"--open-only" parameter specified on command-line, then
      * don't report the status of closed-ports */
-    if (out->is_open_only)
-    switch (status) {
-    case Port_Open:
-    case Port_IcmpEchoResponse:
-    case Port_UdpOpen:
-    case Port_ArpOpen:
-    default:
-        break;
-
-    case Port_Closed:
-    case Port_UdpClosed:
+    if (!out->is_show_closed && status == PortStatus_Closed)
         return;
-    }
+    if (!out->is_show_open && status == PortStatus_Open)
+        return;
 
     /* If in "--interactive" mode, then print the banner to the command
      * line screen */
-    if (out->is_interactive) {
+    if (out->is_interactive || out->format == 0) {
         unsigned count;
 
         count = fprintf(stdout, "Discovered %s port %u/%s on %u.%u.%u.%u",
                     status_string(status),
                     port,
-                    proto_from_status(status),
+                    name_from_ip_proto(ip_proto),
                     (ip>>24)&0xFF,
                     (ip>>16)&0xFF,
                     (ip>> 8)&0xFF,
@@ -648,7 +670,7 @@ output_report_status(struct Output *out, time_t timestamp, int status,
      * file, rather than in a separate thread right at the time interval.
      * Thus, if results are coming in slowly, the rotation won't happen
      * on precise boundaries */
-    if (now >= out->rotate.next) {
+    if (is_rotate_time(out, now)) {
         fp = output_do_rotate(out, 0);
         if (fp == NULL)
             return;
@@ -658,39 +680,60 @@ output_report_status(struct Output *out, time_t timestamp, int status,
     /* Keep some statistics so that the user can monitor how much stuff is
      * being found. */
     switch (status) {
-        case Port_Open:
-            out->counts.tcp.open++;
-            break;
-        case Port_Closed:
-            out->counts.tcp.closed++;
-            if (out->is_open_only)
+        case PortStatus_Open:
+            switch (ip_proto) {
+            case 1:
+                out->counts.icmp.echo++;
+                break;
+            case 6:
+                out->counts.tcp.open++;
+                break;
+            case 17:
+                out->counts.udp.open++;
+                break;
+            case 132:
+                out->counts.sctp.open++;
+                break;
+            }
+            if (!out->is_show_open)
                 return;
             break;
-        case Port_IcmpEchoResponse:
-            out->counts.icmp.echo++;
-            break;
-        case Port_UdpOpen:
-            out->counts.udp.open++;
-            break;
-        case Port_UdpClosed:
-            out->counts.udp.closed++;
-            if (out->is_open_only)
+        case PortStatus_Closed:
+            switch (ip_proto) {
+            case 6:
+                out->counts.tcp.closed++;
+                break;
+            case 17:
+                out->counts.udp.closed++;
+                break;
+            case 132:
+                out->counts.sctp.closed++;
+                break;
+            }
+            if (!out->is_show_closed)
                 return;
             break;
-        case Port_ArpOpen:
+        case PortStatus_Arp:
             out->counts.arp.open++;
             break;
         default:
             LOG(0, "unknown status type: %u\n", status);
-            if (out->is_open_only)
-                return;
+            return;
+    }
+
+    /*
+     * If this is a newly opened file, then write file headers
+     */
+    if (out->is_virgin_file) {
+        out->funcs->open(out, fp);
+        out->is_virgin_file = 0;
     }
 
     /*
      * Now do the actual output, whether it be XML, binary, JSON, Redis,
      * and so on.
      */
-    out->funcs->status(out, fp, timestamp, status, ip, port, reason, ttl);
+    out->funcs->status(out, fp, timestamp, status, ip, ip_proto, port, reason, ttl);
 }
 
 
@@ -699,7 +742,9 @@ output_report_status(struct Output *out, time_t timestamp, int status,
 void
 output_report_banner(struct Output *out, time_t now,
                 unsigned ip, unsigned ip_proto, unsigned port,
-                unsigned proto, const unsigned char *px, unsigned length)
+                unsigned proto, 
+                unsigned ttl, 
+                const unsigned char *px, unsigned length)
 {
     FILE *fp = out->fp;
 
@@ -711,12 +756,13 @@ output_report_banner(struct Output *out, time_t now,
 
     /* If in "--interactive" mode, then print the banner to the command
      * line screen */
-    if (out->is_interactive) {
+    if (out->is_interactive || out->format == 0) {
         unsigned count;
         char banner_buffer[4096];
 
-        count = fprintf(stdout, "Banner on port %u/tcp on %u.%u.%u.%u: [%s] %s",
+        count = fprintf(stdout, "Banner on port %u/%s on %u.%u.%u.%u: [%s] %s",
             port,
+            name_from_ip_proto(ip_proto),
             (ip>>24)&0xFF,
             (ip>>16)&0xFF,
             (ip>> 8)&0xFF,
@@ -744,17 +790,25 @@ output_report_banner(struct Output *out, time_t now,
      * file, rather than in a separate thread right at the time interval.
      * Thus, if results are coming in slowly, the rotation won't happen
      * on precise boundaries */
-    if (now >= out->rotate.next) {
+    if (is_rotate_time(out, now)) {
         fp = output_do_rotate(out, 0);
         if (fp == NULL)
             return;
     }
 
     /*
+     * If this is a newly opened file, then write file headers
+     */
+    if (out->is_virgin_file) {
+        out->funcs->open(out, fp);
+        out->is_virgin_file = 0;
+    }
+
+    /*
      * Now do the actual output, whether it be XML, binary, JSON, Redis,
      * and so on.
      */
-    out->funcs->banner(out, fp, now, ip, ip_proto, port, proto, px, length);
+    out->funcs->banner(out, fp, now, ip, ip_proto, port, proto, ttl, px, length);
 
 }
 

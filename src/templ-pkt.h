@@ -1,7 +1,9 @@
 #ifndef TCP_PACKET_H
 #define TCP_PACKET_H
 #include <stdio.h>
+#include <stdint.h>
 struct NmapPayloads;
+struct MassScript;
 
 /**
  * Does a regression test of this module.
@@ -18,9 +20,10 @@ enum TemplateProtocol {
     Proto_ICMP_ping,
     Proto_ICMP_timestamp,
     Proto_ARP,
+    Proto_Script,
     //Proto_IP,
     //Proto_Custom,
-    //Proto_Count
+    Proto_Count
 };
 
 struct TemplatePayload {
@@ -29,6 +32,15 @@ struct TemplatePayload {
     unsigned char buf[1500];
 };
 
+unsigned
+udp_checksum2(const unsigned char *px, unsigned offset_ip,
+              unsigned offset_tcp, size_t tcp_length);
+
+/**
+ * Describes a packet template. The scan packets we transmit are based on a
+ * a template containing most of the data, and we fill in just the necessary
+ * bits, like the destination IP address and port
+ */
 struct TemplatePacket {
     unsigned length;
     unsigned offset_ip;
@@ -42,12 +54,17 @@ struct TemplatePacket {
     struct NmapPayloads *payloads;
 };
 
+/**
+ * We can run multiple types of scans (TCP, UDP, scripts, etc.) at the same
+ * time. Therefore, instead of one packet prototype for all scans, we have
+ * a set of prototypes/templates.
+ */
 struct TemplateSet
 {
-    const unsigned char *px;
-    unsigned length;
     unsigned count;
-    struct TemplatePacket pkts[8];
+    struct TemplatePacket pkts[Proto_Count];
+    struct MassScript *script;
+    uint64_t entropy;
 };
 
 struct TemplateSet templ_copy(const struct TemplateSet *templ);
@@ -81,7 +98,8 @@ template_packet_init(
     const unsigned char *source_mac,
     const unsigned char *router_mac,
     struct NmapPayloads *payloads,
-    int data_link);
+    int data_link,
+    uint64_t entropy);
 
 /**
  * Sets the target/destination IP address of the packet, the destination port
@@ -117,7 +135,8 @@ template_set_target(
     struct TemplateSet *templset,
     unsigned ip_them, unsigned port_them,
     unsigned ip_me, unsigned port_me,
-    unsigned seqno);
+    unsigned seqno,
+    unsigned char *px, size_t sizeof_px, size_t *r_length);
 
 
 /**

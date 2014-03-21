@@ -86,13 +86,16 @@ int pcap_setdirection(pcap_t *pcap, pcap_direction_t direction)
     if (real_setdirection == 0) {
         HMODULE h = LoadLibraryA("wpcap.dll");
         if (h == NULL) {
-            fprintf(stderr, "couldn't load wpcap.dll: %u\n", GetLastError());
+            fprintf(stderr, "couldn't load wpcap.dll: %u\n", 
+                                (unsigned)GetLastError());
             return -1;
         }
 
-        real_setdirection = (int (*)(pcap_t*,pcap_direction_t))GetProcAddress(h, "pcap_setdirection");
+        real_setdirection = (int (*)(pcap_t*,pcap_direction_t))
+                            GetProcAddress(h, "pcap_setdirection");
         if (real_setdirection == 0) {
-            fprintf(stderr, "couldn't find pcap_setdirection(): %u\n", GetLastError());
+            fprintf(stderr, "couldn't find pcap_setdirection(): %u\n", 
+                                (unsigned)GetLastError());
             return -1;
         }
     }
@@ -195,7 +198,8 @@ rawsock_init(void)
 
         }
     } else {
-        printf("GetAdaptersInfo failed with error: %d\n", dwRetVal);
+        printf("GetAdaptersInfo failed with error: %u\n", 
+                                                    (unsigned)dwRetVal);
 
     }
     if (pAdapterInfo)
@@ -356,7 +360,9 @@ int rawsock_recv_packet(
     unsigned *usecs,
     const unsigned char **packet)
 {
+    
     if (adapter->ring) {
+        /* This is for doing libpfring instead of libpcap */
         struct pfring_pkthdr hdr;
         int err;
 
@@ -412,17 +418,19 @@ rawsock_send_probe(
     unsigned seqno, unsigned flush,
     struct TemplateSet *tmplset)
 {
+    unsigned char px[2048];
+    size_t packet_length;
+
     /*
      * Construct the destination packet
      */
-    template_set_target(tmplset, ip_them, port_them, ip_me, port_me, seqno);
-    if (tmplset->length < 60)
-        tmplset->length = 60;
-
+    template_set_target(tmplset, ip_them, port_them, ip_me, port_me, seqno,
+        px, sizeof(px), &packet_length);
+    
     /*
      * Send it
      */
-    rawsock_send_packet(adapter, tmplset->px, tmplset->length, flush);
+    rawsock_send_packet(adapter, px, (unsigned)packet_length, flush);
 }
 
 
@@ -712,11 +720,12 @@ rawsock_init_adapter(const char *adapter_name,
                 adapter->ring = 0;
                 return 0;
         } else
-            LOG(1, "pfring:'%s': succesfully eenabled\n", adapter_name);
+            LOG(1, "pfring:'%s': successfully enabled\n", adapter_name);
 
         return adapter;
     }
 
+    
     /*----------------------------------------------------------------
      * PORTABILITY: LIBPCAP
      *
@@ -725,12 +734,14 @@ rawsock_init_adapter(const char *adapter_name,
     {
         LOG(1, "pcap: %s\n", pcap_lib_version());
         LOG(2, "pcap:'%s': opening...\n", adapter_name);
+     
         adapter->pcap = pcap_open_live(
                     adapter_name,           /* interface name */
                     65536,                  /* max packet size */
                     8,                      /* promiscuous mode */
                     1000,                   /* read timeout in milliseconds */
                     errbuf);
+        
         if (adapter->pcap == NULL) {
             LOG(0, "FAIL: %s\n", errbuf);
             if (strstr(errbuf, "perm")) {
@@ -747,6 +758,7 @@ rawsock_init_adapter(const char *adapter_name,
             return 0;
         } else
             LOG(1, "pcap:'%s': successfully opened\n", adapter_name);
+        
 
         /* Figure out the link-type. We suport Ethernet and IP */
         {
@@ -765,6 +777,7 @@ rawsock_init_adapter(const char *adapter_name,
 
             }
         }
+        
 
         /* Set any BPF filters the user might've set */
         if (bpf_filter) {
@@ -789,6 +802,9 @@ rawsock_init_adapter(const char *adapter_name,
                 exit(1);
             }
         }
+
+        
+
     }
 
     /*----------------------------------------------------------------

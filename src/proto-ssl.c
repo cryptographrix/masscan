@@ -174,107 +174,6 @@ server_hello(
     hello->remaining = remaining;
 }
 
-enum {
-    CERT_COPY_FINISH=0,
-    CERT_COPY_START=1,
-};
-
-
-/***************************************************************************
- ***************************************************************************/
-static const char *b64 =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    "abcdefghijklmnopqrstuvwxyz"
-    "0123456789"
-    "+/";
-
-/***************************************************************************
- ***************************************************************************/
-static void
-out_b64(unsigned x, struct BannerOutput *banout, unsigned proto)
-{
-    banout_append_char(banout, proto, b64[(x>>18)&0x3F]);
-    banout_append_char(banout, proto, b64[(x>>12)&0x3F]);
-    banout_append_char(banout, proto, b64[(x>> 6)&0x3F]);
-    banout_append_char(banout, proto, b64[(x>> 0)&0x3F]);
-}
-
-/***************************************************************************
- ***************************************************************************/
-static void
-server_cert_copy(   struct SSL_SERVER_CERT *data,
-                    const unsigned char *px,
-                    unsigned length,
-                    struct BannerOutput *banout
-                    )
-{
-    unsigned state = data->sub.state;
-    unsigned b64x = data->sub.b64x;
-    unsigned i;
-
-    /*
-     * Initialize
-     */
-    if (px == 0 && length == CERT_COPY_START) {
-        data->sub.state = 0;
-        data->sub.b64x = 0;
-        banout_append(  banout, PROTO_X509_CERT,
-                        "cert:", 5);
-        return;
-    }
-
-    /*
-     * Convert to base64
-     */
-    if (px)
-    for (i=0; i<length; i++)
-    switch (state) {
-    case 0:
-        b64x = px[i];
-        DROPDOWN(i,length,state);
-    case 1:
-        b64x = b64x * 256 + px[i];
-        DROPDOWN(i,length,state);
-    case 2:
-        b64x = b64x * 256 + px[i];
-        state = 0;
-        out_b64(b64x, banout, PROTO_X509_CERT);
-    }
-
-    /*
-     * Finalize: we need to put the final touches on the
-     * base64 encoding
-     */
-    if (px == 0) {
-        switch (state) {
-        case 0:
-            out_b64(b64x, banout, PROTO_X509_CERT);
-            break;
-        case 1:
-            b64x *= 256;
-            banout_append_char(banout, PROTO_X509_CERT, b64[(b64x>>18)&0x3F]);
-            banout_append_char(banout, PROTO_X509_CERT, b64[(b64x>>12)&0x3F]);
-            banout_append_char(banout, PROTO_X509_CERT, '=');
-            banout_append_char(banout, PROTO_X509_CERT, '=');
-            break;
-        case 2:
-            b64x *= 256;
-            b64x *= 256;
-            banout_append_char(banout, PROTO_X509_CERT, b64[(b64x>>18)&0x3F]);
-            banout_append_char(banout, PROTO_X509_CERT, b64[(b64x>>12)&0x3F]);
-            banout_append_char(banout, PROTO_X509_CERT, b64[(b64x>>6)&0x3F]);
-            banout_append_char(banout, PROTO_X509_CERT, '=');
-            break;
-        }
-
-        banout_end(banout, PROTO_X509_CERT);
-
-    }
-
-    data->sub.state = state;
-    data->sub.b64x = b64x;
-}
-
 /***************************************************************************
  ***************************************************************************/
 static void
@@ -327,8 +226,11 @@ server_cert(
     case CLEN2:
         cert_remaining = cert_remaining * 256 + px[i];
         remaining--;
-        if (banner1->is_capture_cert)
-            server_cert_copy(data, 0, CERT_COPY_START, banout);
+        if (banner1->is_capture_cert) {
+            banout_init_base64(&data->sub.base64);
+            banout_append(  banout, PROTO_X509_CERT, "cert:", 5);
+        }
+
         memset(&data->x509, 0, sizeof(data->x509));
         x509_init_state(&data->x509, cert_remaining);
         DROPDOWN(i,length,state);
@@ -342,8 +244,12 @@ server_cert(
                 len = cert_remaining;
 
             /* parse the certificate */
-            if (banner1->is_capture_cert)
-                server_cert_copy(data, px+i, len, banout);
+            if (banner1->is_capture_cert) {
+                banout_append_base64(banout, 
+                             PROTO_X509_CERT, 
+                             px+i, len,
+                             &data->sub.base64);
+            }
 
             x509_decode(&data->x509, px+i, len, banout);
             //assert(((size_t)banout->next>>32) == 0);
@@ -356,8 +262,10 @@ server_cert(
             if (cert_remaining == 0) {
                 /* We've reached the end of the certificate, so make
                  * a record of it */
-                if (banner1->is_capture_cert)
-                    server_cert_copy(data,  0, CERT_COPY_FINISH,  banout);
+                if (banner1->is_capture_cert) {
+                    banout_finalize_base64(banout, PROTO_X509_CERT, &data->sub.base64);        
+                    banout_end(banout, PROTO_X509_CERT);
+                }
                 state = CLEN0;
             }
         }
@@ -653,6 +561,7 @@ ssl_selftest(void)
                 banout1
                 );
     banner1_destroy(banner1);
+    banout_release(banout1);
 
     /*
      * Do the fragmented parse
@@ -670,7 +579,7 @@ ssl_selftest(void)
                 banout2
                 );
     banner1_destroy(banner1);
-
+    banout_release(banout2);
 
     /*
      * Do checking

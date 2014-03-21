@@ -120,15 +120,13 @@ one port.
   * `--http-user-agent <user-agent>`: replaces the existing user-agent field
     with the indicated value when doing HTTP requests.
 
-  * `--open-only`: report only open ports, not closed ports.
+  * `--show [open,closed]`: tells which port status to display, such
+    as 'open' for those ports that respond with a SYN-ACK on TCP, or
+	'closed' for those ports that repsond with RST. The default is
+	only to display 'open' ports.
 
-  * `--output-format <fmt>`: indicates the format of the output file, which
-    can be `xml` or `binary`. The option `--output-filename` must be
-	specified.
-
-  * `--output-filename <filename>`: the file which to save results to. If
-    the parameter `--output-format` is not specified, then the default of
-	`xml` will be used.
+  * `--noshow [open,closed]`: disables a port status to display, such
+    as to no longer display 'open' ports.
 
   * `--pcap <filename>`: saves received packets (but not transmitted
     packets) to the libpcap-format file.
@@ -147,11 +145,11 @@ one port.
 	it among multiple instances, though the `--shards` option might be 
 	better.
 
-  * `--shards <x>/<y>`: splits the scan among instances. `x` is the id
-   for this scan, while `y` is the total number of instances. For example,
-   `--shards 1/2` tells an instance to send every other packet, starting
-   with index 0. Likewise, `--shards 2/2` sends every other packet, but
-   starting with index 1, so that it doesn't overlap with the first example.
+  * `--shards <x>/<y>`: splits the scan among instances. `x` is the id 
+	  for this scan, while `y` is the total number of instances. For example,
+	  `--shards 1/2` tells an instance to send every other packet, starting
+	  with index 0. Likewise, `--shards 2/2` sends every other packet, but
+	  starting with index 1, so that it doesn't overlap with the first example.
 
   * `--rotate <time>`: rotates the output file, renaming it with the 
     current timestamp, moving it to a separate directory. The time is
@@ -162,6 +160,10 @@ one port.
 
   * `--rotate-offset <time>`: an offset in the time. This is to accomodate
     timezones.
+
+  * `--rotate-size <size>`: rotates the output file when it exceeds the
+    given size. Typical suffixes can be applied (k,m,g,t) for kilo, mega,
+	giga, tera.
 
   * `--rotate-dir <directory>`: when rotating the file, this specifies which
     directory to move the file to. A useful directory is `/var/log/masscan`.
@@ -194,16 +196,39 @@ one port.
 	`--shard`, `--resume-index`, and `--resume-count` can be useful with
 	this feature.
     
-  * `-oX <filename>`: sets the output format to XML and saves the output in the
-    given filename. This is equivelent to using the `--output-format` and
-    `--output-filename` parameters.
-    
+  * `--interactive`: show the results in realtime on the console. It has 
+    no effect if used with --output-format or --output-filename.		
+  
+  * `--output-format <fmt>`: indicates the format of the output file, which
+    can be `xml`, `binary`, `grepable`, `list`, or `JSON`. The 
+	option `--output-filename` must be specified.
+
+  * `--output-filename <filename>`: the file which to save results to. If
+    the parameter `--output-format` is not specified, then the default of 
+	`xml` will be used.
+		   
   * `-oB <filename>`: sets the output format to binary and saves the output in
     the given filename. This is equivelent to using the `--output-format` and
     `--output-filename` parameters. The option `--readscan` can then be used to
     read the binary file. Binary files are mush smaller than their XML
     equivelents, but require a separate step to convert back into XML or
     another readable format.
+	
+  * `-oX <filename>`: sets the output format to XML and saves the output in the
+    given filename. This is equivelent to using the `--output-format xml` and
+    `--output-filename` parameters.
+	
+  * `-oG <filename>`: sets the output format to grepable and saves the output 
+	  in the given filename. This is equivelent to using the --output-format grepable 
+	  and --output-filename parameters.
+  
+  * `-oJ <filename>`: sets the output format to JSON and saves the output in 
+	  the given filename. This is equivelent to using the --output-format json 
+	  and --output-filename parameters.
+  
+  * `-oL <filename>`: sets the output format to a simple list format and saves 
+	  the output in the given filename. This is equivelent to using 
+	  the --output-format list and --output-filename parameters.
 
   *  `--readscan <binary-files>`: reads the files created by the `-oB` option
     from a scan, then outputs them in one of the other formats, depending
@@ -219,6 +244,23 @@ one port.
     in the chain. However, beware that when this is set to a large value, it'll
     consume a lot of memory on fast scans. While the code may handle millions of 
     open TCP connections, you may not have enough memory for that.
+
+  * `--hello-file[<port>] <filename>`: send the contents of the file once the 
+    TCP connection has been established with the given port. Requires that
+    `--banners` also be set. Heuristics will be performed on the reponse in
+    an attempt to discover what protocol, so HTTP responses will be parsed
+    differently than other protocols.
+
+  * `--hello-string[<port>] <base64>`: same as `--hello-file` except that the
+    contents of the BASE64 encoded string are decoded, then used as the hello
+    string that greets the server.
+
+  * `--capture <type>` or `--nocapture <type>`: when doing banners (`--banner`), this
+    determines what to capture from the banners. By default, only the TITLE field from
+	HTML documents is captured, to get the entire document, use `--capture html`.
+	By default, the entire certificate from SSL is captured, to disable this, use
+	`--nocapture cert`. Currently, only the values `html` and `cert` are currently
+	supported for this option, but many more will be added in the future.
     
 
 ## CONFIGURATION FILE FORMAT

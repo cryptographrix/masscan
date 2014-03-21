@@ -12,12 +12,16 @@ struct Banner1
     struct SMACK *http_fields;
     struct SMACK *html_fields;
 
-    /*unsigned char *http_header;
-    unsigned http_header_length;*/
     unsigned is_capture_html:1;
     unsigned is_capture_cert:1;
 
-    const struct ProtocolParserStream *tcp_payloads[65536];
+    struct ProtocolParserStream *tcp_payloads[65536];
+};
+
+struct BanBase64
+{
+    unsigned state:2;
+    unsigned temp:24;
 };
 
 struct SSL_SERVER_HELLO {
@@ -34,8 +38,7 @@ struct SSL_SERVER_CERT {
     unsigned remaining;
     struct {
         unsigned remaining;
-        unsigned state;
-        unsigned b64x;
+        struct BanBase64 base64;
     } sub;
     struct CertDecode x509;
 };

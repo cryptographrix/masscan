@@ -23,6 +23,7 @@
 #include "output.h"
 #include "string_s.h"
 #include "main-globals.h"
+#include "crypto-base64.h"
 
 
 
@@ -49,6 +50,7 @@ struct TCP_Control_Block
     struct TCP_Control_Block *next;
     struct TimeoutEntry timeout[1];
 
+    unsigned char ttl;
     unsigned tcpstate:4;
 
 
@@ -69,6 +71,7 @@ struct TCP_ConnectionTable {
     unsigned timeout;
 
     uint64_t active_count;
+    uint64_t entropy;
 
     struct Timeouts *timeouts;
     struct TemplatePacket *pkt_template;
@@ -153,6 +156,8 @@ name_equals(const char *lhs, const char *rhs)
             rhs++;
         if (*lhs == '\0' && *rhs == '[')
             return 1; /*arrays*/
+        if (*rhs == '\0' && *lhs == '[')
+            return 1; /*arrays*/
         if (tolower(*lhs & 0xFF) != tolower(*rhs & 0xFF))
             return 0;
         if (*lhs == '\0')
@@ -188,6 +193,8 @@ tcpcon_set_parameter(struct TCP_ConnectionTable *tcpcon,
                         size_t value_length,
                         const void *value)
 {
+    struct Banner1 *banner1 = tcpcon->banner1;
+
     if (name_equals(name, "http-user-agent")) {
         banner_http.hello_length = http_change_field(
                                 (unsigned char**)&banner_http.hello,
@@ -204,6 +211,33 @@ tcpcon_set_parameter(struct TCP_ConnectionTable *tcpcon,
         LOG(1, "TCP connection-timeout = %u\n", tcpcon->timeout);
         return;
     }
+
+    if (name_equals(name, "hello-string")) {
+        struct ProtocolParserStream *x;
+        const char *p = strchr(name, '[');
+        unsigned port;
+
+
+        if (p == NULL) {
+            fprintf(stderr, "tcpcon: parmeter: expected array []: %s\n", name);
+            exit(1);
+        }
+        port = strtoul(p+1, 0, 0);
+
+        x = banner1->tcp_payloads[port];
+        if (x == NULL) {
+            x = (struct ProtocolParserStream *)malloc(sizeof(*x));
+            memset(x, 0, sizeof(*x));
+
+            x->name = "(allocated)";
+        }
+
+        x->hello = malloc(value_length);
+        x->hello_length = base64_decode((char*)x->hello, value_length, value, value_length);
+
+        banner1->tcp_payloads[port] = x;
+    }
+
 }
 
 
@@ -229,7 +263,8 @@ tcpcon_create_table(    size_t entry_count,
                         struct TemplatePacket *pkt_template,
                         OUTPUT_REPORT_BANNER report_banner,
                         struct Output *out,
-                        unsigned timeout
+                        unsigned timeout,
+                        uint64_t entropy
                         )
 {
     struct TCP_ConnectionTable *tcpcon;
@@ -241,6 +276,7 @@ tcpcon_create_table(    size_t entry_count,
     tcpcon->timeout = timeout;
     if (tcpcon->timeout == 0)
         tcpcon->timeout = 30; /* half a minute before destroying tcb */
+    tcpcon->entropy = entropy;
 
     /* Find nearest power of 2 to the tcb count, but don't go
      * over the number 16-million */
@@ -299,7 +335,9 @@ tcpcon_create_table(    size_t entry_count,
 /***************************************************************************
  ***************************************************************************/
 static unsigned
-tcb_hash(unsigned ip_me, unsigned port_me, unsigned ip_them, unsigned port_them)
+tcb_hash(   unsigned ip_me, unsigned port_me, 
+            unsigned ip_them, unsigned port_them,
+            uint64_t entropy)
 {
     unsigned index;
 
@@ -308,7 +346,8 @@ tcb_hash(unsigned ip_me, unsigned port_me, unsigned ip_them, unsigned port_them)
     index = (unsigned)syn_cookie(   ip_me   ^ ip_them,
                                     port_me ^ port_them,
                                     ip_me   ^ ip_them,
-                                    port_me ^ port_them
+                                    port_me ^ port_them,
+                                    entropy
                                     );
     return index;
 }
@@ -330,7 +369,9 @@ tcpcon_destroy_tcb(
      * The TCB doesn't point to it's location in the table. Therefore, we
      * have to do a lookup to find the head pointer in the table.
      */
-    index = tcb_hash(tcb->ip_me, tcb->port_me, tcb->ip_them, tcb->port_them);
+    index = tcb_hash(   tcb->ip_me, tcb->port_me, 
+                        tcb->ip_them, tcb->port_them, 
+                        tcpcon->entropy);
 
     /*
      * At this point, we have the head of a linked list of TCBs. Now,
@@ -368,6 +409,7 @@ tcpcon_destroy_tcb(
                 6, /*TCP protocol*/
                 tcb->port_them,
                 banout->protocol & 0x0FFFFFFF,
+                tcb->ttl,
                 banout->banner,
                 banout->length);
         }
@@ -441,7 +483,8 @@ tcpcon_create_tcb(
     struct TCP_ConnectionTable *tcpcon,
     unsigned ip_me, unsigned ip_them,
     unsigned port_me, unsigned port_them,
-    unsigned seqno_me, unsigned seqno_them)
+    unsigned seqno_me, unsigned seqno_them,
+    unsigned ttl)
 {
     unsigned index;
     struct TCP_Control_Block tmp;
@@ -452,7 +495,7 @@ tcpcon_create_tcb(
     tmp.port_me = (unsigned short)port_me;
     tmp.port_them = (unsigned short)port_them;
 
-    index = tcb_hash(ip_me, port_me, ip_them, port_them);
+    index = tcb_hash(ip_me, port_me, ip_them, port_them, tcpcon->entropy);
     tcb = tcpcon->entries[index & tcpcon->mask];
     while (tcb && !EQUALS(tcb, &tmp)) {
         tcb = tcb->next;
@@ -478,6 +521,7 @@ tcpcon_create_tcb(
         tcb->ackno_them = seqno_me;
         tcb->when_created = global_now;
         tcb->banner1_state.port = tmp.port_them;
+        tcb->ttl = (unsigned char)ttl;
 
         timeout_init(tcb->timeout);
         banout_init(&tcb->banout);
@@ -507,7 +551,7 @@ tcpcon_lookup_tcb(
     tmp.port_me = (unsigned short)port_me;
     tmp.port_them = (unsigned short)port_them;
 
-    index = tcb_hash(ip_me, port_me, ip_them, port_them);
+    index = tcb_hash(ip_me, port_me, ip_them, port_them, tcpcon->entropy);
 
     tcb = tcpcon->entries[index & tcpcon->mask];
     while (tcb && !EQUALS(tcb, &tmp)) {
@@ -538,13 +582,16 @@ tcpcon_send_packet(
     for (err=1; err; ) {
         err = rte_ring_sc_dequeue(tcpcon->packet_buffers, (void**)&response);
         if (err != 0) {
-            //LOG(0, "packet buffers empty (should be impossible)\n");
-            printf("+");
+            static int is_warning_printed = 0;
+            if (!is_warning_printed) {
+                LOG(0, "packet buffers empty (should be impossible)\n");
+                is_warning_printed = 1;
+            }
             fflush(stdout);
             pixie_usleep(wait = (uint64_t)(wait *1.5)); /* no packet available */
         }
-        if (wait != 100)
-            printf("\n");
+        //if (wait != 100)
+        //    ; //printf("\n");FIXME
     }
     if (response == NULL)
         return;
@@ -608,13 +655,16 @@ tcp_send_RST(
     for (err=1; err; ) {
         err = rte_ring_sc_dequeue(packet_buffers, (void**)&response);
         if (err != 0) {
-            //LOG(0, "packet buffers empty (should be impossible)\n");
-            printf("+");
+            static int is_warning_printed = 0;
+            if (!is_warning_printed) {
+                LOG(0, "packet buffers empty (should be impossible)\n");
+                is_warning_printed = 1;
+            }
             fflush(stdout);
             pixie_usleep(wait = (uint64_t)(wait *1.5)); /* no packet available */
         }
-        if (wait != 100)
-            printf("\n");
+        //if (wait != 100)
+        //    ;//printf("\n"); FIXME
     }
     if (response == NULL)
         return;
@@ -682,6 +732,7 @@ parse_banner(
     size_t payload_length)
 {
     assert(tcb->banout.max_length);
+    
     banner1_parse(
                                     tcpcon->banner1,
                                     &tcb->banner1_state,
@@ -908,24 +959,17 @@ tcpcon_handle(struct TCP_ConnectionTable *tcpcon,
         {
             unsigned err;
 
-            /* If this packet skips over a lost packet on the Internet,
-             * then we need to discard it */
-            if (seqno_them - tcb->seqno_them < 10000
-                && 0 < seqno_them - tcb->seqno_them)
+            if ((unsigned)(tcb->seqno_them - seqno_them) > payload_length)
                 return;
 
-            /* If this payload overlaps something we've already seen, then
-             * shrink the payload length */
-            if (tcb->seqno_them - seqno_them < 10000) {
-                unsigned already_received = tcb->seqno_them - seqno_them;
-                if (already_received >= payload_length)
-                    return;
-                else {
-                    payload += already_received;
-                    payload_length -= already_received;
-                }
+            while (seqno_them != tcb->seqno_them && payload_length) {
+                seqno_them++;
+                payload_length--;
             }
 
+            if (payload_length == 0)
+                return;
+            
             /* extract a banner if we can */
             err = parse_banner(
                         tcpcon,
@@ -935,7 +979,7 @@ tcpcon_handle(struct TCP_ConnectionTable *tcpcon,
 
             /* move their sequence number forward */
             tcb->seqno_them += (unsigned)payload_length;
-
+            
             /* acknowledge the bytes sent */
             tcpcon_send_packet(tcpcon, tcb,
                         0x10,
@@ -952,7 +996,7 @@ tcpcon_handle(struct TCP_ConnectionTable *tcpcon,
         break;
 
     case STATE_READY_TO_SEND<<8 | TCP_WHAT_FIN:
-        tcb->seqno_them = seqno_them + 1;
+        tcb->seqno_them = seqno_them + (unsigned)payload_length + 1;
         tcpcon_send_packet(tcpcon, tcb,
                     0x11, /*reset */
                     0, 0);
@@ -1028,7 +1072,7 @@ tcpcon_handle(struct TCP_ConnectionTable *tcpcon,
 
 
     case STATE_WAITING_FOR_RESPONSE<<8 | TCP_WHAT_FIN:
-        tcb->seqno_them = seqno_them + 1;
+        tcb->seqno_them = seqno_them + (unsigned)payload_length + 1;
         tcpcon_send_packet(tcpcon, tcb,
             0x11,
             0, 0);

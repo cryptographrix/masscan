@@ -12,16 +12,32 @@
 
 */
 #include "masscan.h"
+#include "masscan-version.h"
 #include "ranges.h"
 #include "string_s.h"
 #include "logger.h"
 #include "proto-banner1.h"
 #include "templ-payloads.h"
 #include "templ-port.h"
+#include "crypto-base64.h"
+#include "script.h"
 
 #include <ctype.h>
 #include <limits.h>
 
+/***************************************************************************
+ ***************************************************************************/
+/*static struct Range top_ports_tcp[] = {
+    {80, 80},{23, 23}, {443,443},{21,22},{25,25},{3389,3389},{110,110},
+    {445,445},
+};
+static struct Range top_ports_udp[] = {
+    {161, 161}, {631, 631}, {137,138},{123,123},{1434},{445,445},{135,135},
+    {67,67},
+};
+static struct Range top_ports_sctp[] = {
+    {7, 7},{9, 9},{20,22},{80,80},{179,179},{443,443},{1167,1167},
+};*/
 
 /***************************************************************************
  ***************************************************************************/
@@ -33,7 +49,93 @@ masscan_usage(void)
     printf(" scan some web ports on 10.x.x.x at 10kpps\n");
     printf("masscan --nmap\n");
     printf(" list those options that are compatiable with nmap\n");
+    printf("masscan -p80 10.0.0.0/8 --banners -oB <filename>\n");
+    printf(" save results of scan in binary format to <filename>\n");
+    printf("masscan --open --banners --readscan <filename> -oX <savefile>\n");
+    printf(" read binary scan results in <filename> and save them as xml in <savefile>\n");
     exit(1);
+}
+
+/***************************************************************************
+ ***************************************************************************/
+static void
+print_version()
+{
+    const char *cpu = "unknown";
+    const char *compiler = "unknown";
+    const char *compiler_version = "unknown";
+    const char *os = "unknown";
+    printf("\n");
+    printf("Masscan version %s ( %s )\n", 
+        MASSCAN_VERSION,
+        "https://github.com/robertdavidgraham/masscan"
+        );
+    printf("Compiled on: %s %s\n", __DATE__, __TIME__);
+
+#if defined(_MSC_VER)
+    #if defined(_M_AMD64) || defined(_M_X64)
+        cpu = "x86";
+    #elif defined(_M_IX86)
+        cpu = "x86";
+    #elif defined (_M_ARM_FP)
+        cpu = "arm";
+    #endif
+
+    {
+        int msc_ver = _MSC_VER;
+
+        compiler = "VisualStudio";
+
+        if (msc_ver < 1500)
+            compiler_version = "pre2008";
+        else if (msc_ver == 1500)
+            compiler_version = "2008";
+        else if (msc_ver == 1600)
+            compiler_version = "2010";
+        else if (msc_ver == 1700)
+            compiler_version = "2012";
+        else if (msc_ver == 1800)
+            compiler_version = "2013";
+        else
+            compiler_version = "post-2013";
+    }
+
+
+#elif defined(__GNUC__)
+    compiler = "gcc";
+    compiler_version = __VERSION__;
+
+#if defined(i386) || defined(__i386) || defined(__i386__)
+    cpu = "x86";
+#endif
+
+#if defined(__corei7) || defined(__corei7__)
+    cpu = "x86-Corei7";
+#endif
+
+#endif
+
+#if defined(WIN32)
+    os = "Windows";
+#elif defined(__linux__)
+    os = "Linux";
+#elif defined(__APPLE__)
+    os = "Apple";
+#elif defined(__MACH__)
+    os = "MACH";
+#elif defined(__FreeBSD__)
+    os = "FreeBSD";
+#elif defined(unix) || defined(__unix) || defined(__unix__)
+    os = "Unix";
+#endif
+
+    printf("Compiler: %s %s\n", compiler, compiler_version);
+    printf("OS: %s\n", os);
+    printf("CPU: %s (%u bits)\n", cpu, (unsigned)(sizeof(void*))*8);
+
+#if defined(GIT)
+    printf("GIT version: %s\n", GIT);
+#endif
 }
 
 /***************************************************************************
@@ -55,11 +157,16 @@ print_nmap_help(void)
 "  -n: Never do DNS resolution (default)\n"
 "SCAN TECHNIQUES:\n"
 "  -sS: TCP SYN (always on, default)\n"
+"SERVICE/VERSION DETECTION:\n"
+"  --banners: get the banners of the listening service if available. The\n"
+"    default timeout for waiting to recieve data is 30 seconds.\n"
 "PORT SPECIFICATION AND SCAN ORDER:\n"
 "  -p <port ranges>: Only scan specified ports\n"
 "    Ex: -p22; -p1-65535; -p 111,137,80,139,8080\n"
 "TIMING AND PERFORMANCE:\n"
 "  --max-rate <number>: Send packets no faster than <number> per second\n"
+"  --connection-timeout <number>: time in seconds a TCP connection will\n"
+"    timeout while waiting for banner data from a port.\n"
 "FIREWALL/IDS EVASION AND SPOOFING:\n"
 "  -S/--source-ip <IP_Address>: Spoof source address\n"
 "  -e <iface>: Use specified interface\n"
@@ -67,8 +174,12 @@ print_nmap_help(void)
 "  --ttl <val>: Set IP time-to-live field\n"
 "  --spoof-mac <mac address/prefix/vendor name>: Spoof your MAC address\n"
 "OUTPUT:\n"
-"  -oL/-oJ <file>: Output scan in List or JSON format, respectively,\n"
-"     to the given filename.\n"
+"  --output-format <format>: Sets output to binary/list/json/grepable/xml\n"
+"  --output-file <file>: Write scan results to file. If --output-format is\n"
+"     not given default is xml\n"
+"  -oL/-oJ/-oG/-oB/-oX <file>: Output scan in List/JSON/Grepable/Binary/XML format,\n"
+"     respectively, to the given filename. Shortcut for\n"
+"     --output-format <format> --output-file <file>\n"
 "  -v: Increase verbosity level (use -vv or more for greater effect)\n"
 "  -d: Increase debugging level (use -dd or more for greater effect)\n"
 "  --open: Only show open (or possibly open) ports\n"
@@ -82,7 +193,8 @@ print_nmap_help(void)
 "  -h: Print this help summary page.\n"
 "EXAMPLES:\n"
 "  masscan -v -sS 192.168.0.0/16 10.0.0.0/8 -p 80\n"
-"  masscan 23.0.0.0/0 -p80 -output-format binary --output-filename internet.scan\n"
+"  masscan 23.0.0.0/0 -p80 --banners -output-format binary --output-filename internet.scan\n"
+"  masscan --open --banners --readscan internet.scan -oG internet_scan.grepable\n"
 "SEE (https://github.com/robertdavidgraham/masscan) FOR MORE HELP\n"
 "\n");
 }
@@ -180,7 +292,7 @@ masscan_echo(struct Masscan *masscan, FILE *fp)
 
     fprintf(fp, "rate = %10.2f\n", masscan->max_rate);
     fprintf(fp, "randomize-hosts = true\n");
-    fprintf(fp, "seed = %llu\n", masscan->seed);
+    fprintf(fp, "seed = %" PRIu64 "\n", masscan->seed);
     fprintf(fp, "shard = %u/%u\n", masscan->shard.one, masscan->shard.of);
     if (masscan->is_banners)
         fprintf(fp, "banners = true\n");
@@ -198,11 +310,12 @@ masscan_echo(struct Masscan *masscan, FILE *fp)
      * Output information
      */
     fprintf(fp, "# OUTPUT/REPORTING SETTINGS\n");
-    switch (masscan->nmap.format) {
+    switch (masscan->output.format) {
     case Output_Interactive:fprintf(fp, "output-format = interactive\n"); break;
     case Output_List:       fprintf(fp, "output-format = list\n"); break;
     case Output_XML:        fprintf(fp, "output-format = xml\n"); break;
     case Output_Binary:     fprintf(fp, "output-format = binary\n"); break;
+    case Output_Grepable:   fprintf(fp, "output-format = grepable\n"); break;
     case Output_JSON:       fprintf(fp, "output-format = json\n"); break;
     case Output_None:       fprintf(fp, "output-format = none\n"); break;
     case Output_Redis:
@@ -216,17 +329,23 @@ masscan_echo(struct Masscan *masscan, FILE *fp)
         break;
 
     default:
-        fprintf(fp, "output-format = unknown(%u)\n", masscan->nmap.format);
+        fprintf(fp, "output-format = unknown(%u)\n", masscan->output.format);
         break;
     }
-    fprintf(fp, "output-status = %s\n",
-            masscan->nmap.open_only?"open":"all");
-    fprintf(fp, "output-filename = %s\n", masscan->nmap.filename);
-    if (masscan->nmap.append)
+    fprintf(fp, "show = %s,%s,%s\n",
+            masscan->output.is_show_open?"open":"",
+            masscan->output.is_show_closed?"closed":"",
+            masscan->output.is_show_host?"host":""
+            );
+    if (!masscan->output.is_show_open)
+        fprintf(fp, "noshow = open\n");
+    fprintf(fp, "output-filename = %s\n", masscan->output.filename);
+    if (masscan->output.is_append)
         fprintf(fp, "output-append = true\n");
-    fprintf(fp, "rotate = %u\n", masscan->rotate_output);
-    fprintf(fp, "rotate-dir = %s\n", masscan->rotate_directory);
-    fprintf(fp, "rotate-offset = %u\n", masscan->rotate_offset);
+    fprintf(fp, "rotate = %u\n", masscan->output.rotate.timeout);
+    fprintf(fp, "rotate-dir = %s\n", masscan->output.rotate.directory);
+    fprintf(fp, "rotate-offset = %u\n", masscan->output.rotate.offset);
+    fprintf(fp, "rotate-filesize = %" PRIu64 "\n", masscan->output.rotate.filesize);
     fprintf(fp, "pcap = %s\n", masscan->pcap_filename);
 
     /*
@@ -289,6 +408,20 @@ masscan_echo(struct Masscan *masscan, FILE *fp)
 
     fprintf(fp, "%scapture = cert\n", masscan->is_capture_cert?"":"no");
     fprintf(fp, "%scapture = html\n", masscan->is_capture_html?"":"no");
+
+    /*
+     *  TCP payloads
+     */
+    fprintf(fp, "\n");
+    fprintf(fp, "min-packet = %u\n", masscan->min_packet_size);
+
+    {
+        struct TcpCfgPayloads *pay;
+        for (pay = masscan->tcp_payloads; pay; pay = pay->next) {
+            fprintf(fp, "hello-string[%u] = %s\n",
+                pay->port, pay->payload_base64);
+        }
+    }
 }
 
 /***************************************************************************
@@ -313,7 +446,7 @@ masscan_save_state(struct Masscan *masscan)
     }
 
     fprintf(fp, "\n# resume information\n");
-    fprintf(fp, "resume-index = %llu\n", masscan->resume.index);
+    fprintf(fp, "resume-index = %" PRIu64 "\n", masscan->resume.index);
 
     masscan_echo(masscan, fp);
 
@@ -550,6 +683,55 @@ parseTime(const char *value)
 }
 
 /***************************************************************************
+ * Parses a size integer, which can be suffixed with "tera", "giga", 
+ * "mega", and "kilo". These numbers are in units of 1024 so suck it.
+ ***************************************************************************/
+static uint64_t
+parseSize(const char *value)
+{
+    uint64_t num = 0;
+
+    while (isdigit(value[0]&0xFF)) {
+        num = num*10 + (value[0] - '0');
+        value++;
+    }
+    while (ispunct(value[0]) || isspace(value[0]))
+        value++;
+
+    if (isalpha(value[0]) && num == 0)
+        num = 1;
+
+    if (value[0] == '\0')
+        return num;
+
+    switch (tolower(value[0])) {
+    case 'k': /* kilobyte */
+        num *= 1024ULL;
+        break;
+    case 'm': /* megabyte */
+        num *= 1024ULL * 1024ULL;
+        break;
+    case 'g': /* gigabyte */
+        num *= 1024ULL * 1024ULL * 1024ULL;
+        break;
+    case 't': /* terabyte, 'cause we roll that way */
+        num *=  1024ULL * 1024ULL * 1024ULL * 1024ULL;
+        break;
+    case 'p': /* petabyte, 'cause we are awesome */
+        num *=  1024ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL;
+        break;
+    case 'e': /* exabyte, now that's just silly */
+        num *=  1024ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL;
+        break;
+    default:
+        fprintf(stderr, "--rotate-size: unknown character\n");
+        exit(1);
+    }
+    return num;
+}
+
+
+/***************************************************************************
  ***************************************************************************/
 static int
 is_power_of_two(uint64_t x)
@@ -586,6 +768,36 @@ EQUALS(const char *lhs, const char *rhs)
     }
 }
 
+static int
+EQUALSx(const char *lhs, const char *rhs, size_t rhs_length)
+{
+    for (;;) {
+        while (*lhs == '-' || *lhs == '.' || *lhs == '_')
+            lhs++;
+        while (*rhs == '-' || *rhs == '.' || *rhs == '_')
+            rhs++;
+        if (*lhs == '\0' && *rhs == '[')
+            return 1; /*arrays*/
+        if (tolower(*lhs & 0xFF) != tolower(*rhs & 0xFF))
+            return 0;
+        if (*lhs == '\0')
+            return 1;
+        lhs++;
+        rhs++;
+        if (--rhs_length == 0)
+            return 1;
+    }
+}
+
+static unsigned
+INDEX_OF(const char *str, char c)
+{
+    unsigned i;
+    for (i=0; str[i] && str[i] != c; i++)
+        ;
+    return i;
+}
+
 static unsigned
 ARRAY(const char *rhs)
 {
@@ -606,7 +818,7 @@ masscan_set_parameter(struct Masscan *masscan,
                       const char *name, const char *value)
 {
     unsigned index = ARRAY(name);
-    if (index >= 8) {
+    if (index >= 65536) {
         fprintf(stderr, "%s: bad index\n", name);
         exit(1);
     }
@@ -643,7 +855,7 @@ masscan_set_parameter(struct Masscan *masscan,
 
         /* If more than one IP address given, make the range is
             * an even power of two (1, 2, 4, 8, 16, ...) */
-        if (!is_power_of_two(range.end - range.begin + 1)) {
+        if (!is_power_of_two((uint64_t)range.end - range.begin + 1)) {
             LOG(0, "FAIL: range must be even power of two: %s=%s\n",
                     name, value);
             exit(1);
@@ -651,7 +863,7 @@ masscan_set_parameter(struct Masscan *masscan,
 
         masscan->nic[index].src.ip.first = range.begin;
         masscan->nic[index].src.ip.last = range.end;
-        masscan->nic[index].src.ip.range = range.end - range.begin + 1;
+        masscan->nic[index].src.ip.range = (uint64_t)range.end - range.begin + 1;
     } else if (EQUALS("adapter-port", name) || EQUALS("source-port", name)
                || EQUALS("src-port", name)) {
         /* Send packets FROM this port number */
@@ -882,9 +1094,9 @@ masscan_set_parameter(struct Masscan *masscan,
             masscan->op = Operation_Scan;
     } else if (EQUALS("append-output", name) || EQUALS("output-append", name)) {
         if (EQUALS("overwrite", name))
-            masscan->nmap.append = 0;
+            masscan->output.is_append = 0;
         else
-            masscan->nmap.append = 1;
+            masscan->output.is_append = 1;
     } else if (EQUALS("badsum", name)) {
         masscan->nmap.badsum = 1;
     } else if (EQUALS("banner1", name)) {
@@ -892,8 +1104,12 @@ masscan_set_parameter(struct Masscan *masscan,
         exit(1);
     } else if (EQUALS("banners", name) || EQUALS("banner", name)) {
         masscan->is_banners = 1;
+    } else if (EQUALS("nobanners", name) || EQUALS("nobanner", name)) {
+        masscan->is_banners = 0;
+    } else if (EQUALS("blackrock-rounds", name)) {
+        masscan->blackrock_rounds = (unsigned)parseInt(value);
     } else if (EQUALS("connection-timeout", name)) {
-        masscan->tcp_connection_timeout = parseInt(value);
+        masscan->tcp_connection_timeout = (unsigned)parseInt(value);
     } else if (EQUALS("datadir", name)) {
         strcpy_s(masscan->nmap.datadir, sizeof(masscan->nmap.datadir), value);
     } else if (EQUALS("data-length", name)) {
@@ -923,6 +1139,51 @@ masscan_set_parameter(struct Masscan *masscan,
         if (count2 - count1)
         fprintf(stderr, "%s: excluding %u ranges from file\n",
                 value, count2 - count1);
+    } else if (EQUALS("hello-file", name)) {
+        /* When connecting via TCP, send this file */
+        FILE *fp;
+        int x;
+        char buf[16384];
+        char buf2[16384];
+        size_t bytes_read;
+        size_t bytes_encoded;
+        char foo[64];
+
+        x = fopen_s(&fp, value, "rb");
+        if (x != 0) {
+            LOG(0, "[FAILED] could not read hello file\n");
+            perror(value);
+            exit(1);
+        }
+
+        bytes_read = fread(buf, 1, sizeof(buf), fp);
+        if (bytes_read == 0) {
+            LOG(0, "[FAILED] could not read hello file\n");
+            perror(value);
+            fclose(fp);
+            exit(1);
+        }
+        fclose(fp);
+
+        bytes_encoded = base64_encode(buf2, sizeof(buf2)-1, buf, bytes_read);
+        buf2[bytes_encoded] = '\0';
+
+        sprintf_s(foo, sizeof(foo), "hello-string[%u]", (unsigned)index);
+
+        masscan_set_parameter(masscan, foo, buf2);
+    } else if (EQUALS("hello-string", name)) {
+        char *value2;
+        struct TcpCfgPayloads *pay;
+
+        value2 = (char*)malloc(strlen(value)+1);
+        memcpy(value2, value, strlen(value)+1);
+
+        pay = (struct TcpCfgPayloads *)malloc(sizeof(*pay));
+        
+        pay->payload_base64 = value2;
+        pay->port = index;
+        pay->next = masscan->tcp_payloads;
+        masscan->tcp_payloads = pay;
     } else if (EQUALS("host-timeout", name)) {
         fprintf(stderr, "nmap(%s): unsupported: this is an asynchronous tool, so no timeouts\n", name);
         exit(1);
@@ -975,13 +1236,17 @@ masscan_set_parameter(struct Masscan *masscan,
     } else if (EQUALS("infinite", name)) {
         masscan->is_infinite = 1;
     } else if (EQUALS("interactive", name)) {
-        masscan->is_interactive = 1;
+        masscan->output.is_interactive = 1;
+    } else if (EQUALS("nointeractive", name)) {
+        masscan->output.is_interactive = 0;
     } else if (EQUALS("ip-options", name)) {
         fprintf(stderr, "nmap(%s): unsupported: maybe soon\n", name);
         exit(1);
     } else if (EQUALS("log-errors", name)) {
         fprintf(stderr, "nmap(%s): unsupported: maybe soon\n", name);
         exit(1);
+    } else if (EQUALS("min-packet", name) || EQUALS("min-pkt", name)) {
+        masscan->min_packet_size = (unsigned)parseInt(value);
     } else if (EQUALS("max-retries", name)) {
         masscan_set_parameter(masscan, "retries", value);
     } else if (EQUALS("max-rate", name)) {
@@ -1025,11 +1290,49 @@ masscan_set_parameter(struct Masscan *masscan,
          * it's not */
         masscan->is_offline = 1;
     } else if (EQUALS("open", name) || EQUALS("open-only", name)) {
-        masscan->nmap.open_only = 1;
-    } else if (EQUALS("output-status", name)) {
-        if (EQUALS("open", value))
-            masscan->nmap.open_only = 1;
-
+        masscan->output.is_show_open = 1;
+        masscan->output.is_show_closed = 0;
+        masscan->output.is_show_host = 0;
+    } else if (EQUALS("output-status", name) || EQUALS("show", name)) {
+        for (;;) {
+            const char *val2 = value;
+            unsigned val2_len = INDEX_OF(val2, ',');
+            if (val2_len == 0)
+                break;
+            if (EQUALSx("open", val2, val2_len))
+                masscan->output.is_show_open = 1;
+            else if (EQUALSx("closed", val2, val2_len) || EQUALSx("close", val2, val2_len))
+                masscan->output.is_show_closed = 1;
+            else if (EQUALSx("open", val2, val2_len))
+                masscan->output.is_show_host = 1;
+            else {
+                LOG(0, "FAIL: unknown 'show' spec: %.*s\n", val2_len, val2);
+                exit(1);
+            }
+            value += val2_len;
+            while (*value == ',')
+                value++;
+        }
+    } else if (EQUALS("noshow", name)) {
+        for (;;) {
+            const char *val2 = value;
+            unsigned val2_len = INDEX_OF(val2, ',');
+            if (val2_len == 0)
+                break;
+            if (EQUALSx("open", val2, val2_len))
+                masscan->output.is_show_open = 0;
+            else if (EQUALSx("closed", val2, val2_len) || EQUALSx("close", val2, val2_len))
+                masscan->output.is_show_closed = 0;
+            else if (EQUALSx("open", val2, val2_len))
+                masscan->output.is_show_host = 0;
+            else {
+                LOG(0, "FAIL: unknown 'show' spec: %.*s\n", val2_len, val2);
+                exit(1);
+            }
+            value += val2_len;
+            while (*value == ',')
+                value++;
+        }
     } else if (EQUALS("osscan-limit", name)) {
         fprintf(stderr, "nmap(%s): OS scanning unsupported\n", name);
         exit(1);
@@ -1037,22 +1340,29 @@ masscan_set_parameter(struct Masscan *masscan,
         fprintf(stderr, "nmap(%s): OS scanning unsupported\n", name);
         exit(1);
     } else if (EQUALS("output-format", name)) {
-        masscan->is_interactive = 0;
-        if (EQUALS("list", value))              masscan->nmap.format = Output_List;
-        else if (EQUALS("interactive", value))  masscan->nmap.format = Output_Interactive;
-        else if (EQUALS("xml", value))          masscan->nmap.format = Output_XML;
-        else if (EQUALS("binary", value))       masscan->nmap.format = Output_Binary;
-        else if (EQUALS("json", value))         masscan->nmap.format = Output_JSON;
-        else if (EQUALS("none", value))         masscan->nmap.format = Output_None;
-        else if (EQUALS("redis", value))        masscan->nmap.format = Output_Redis;
+        enum OutputFormat x = 0;
+        if (EQUALS("interactive", value))
+            masscan->output.format = Output_Interactive;
+        else if (EQUALS("list", value))         x = Output_List;
+        else if (EQUALS("xml", value))          x = Output_XML;
+        else if (EQUALS("binary", value))       x = Output_Binary;
+        else if (EQUALS("greppable", value))    x = Output_Grepable;
+        else if (EQUALS("grepable", value))     x = Output_Grepable;
+        else if (EQUALS("json", value))         x = Output_JSON;
+        else if (EQUALS("none", value))         x = Output_None;
+        else if (EQUALS("redis", value))        x = Output_Redis;
         else {
-            fprintf(stderr, "error: %s=%s\n", name, value);
+            LOG(0, "FAIL: unknown output-format: %s\n", value);
+            LOG(0, "  hint: 'binary', 'xml', 'grepable', ...\n");
+            exit(1);
         }
+        masscan->output.format = x;
     } else if (EQUALS("output-filename", name) || EQUALS("output-file", name)) {
-        if (masscan->nmap.format == 0)
-            masscan->nmap.format = Output_XML;
-        masscan->is_interactive = 0;
-        strcpy_s(masscan->nmap.filename, sizeof(masscan->nmap.filename), value);
+        if (masscan->output.format == 0)
+            masscan->output.format = Output_XML;
+        strcpy_s(masscan->output.filename,
+                 sizeof(masscan->output.filename), 
+                 value);
     } else if (EQUALS("pcap", name)) {
         strcpy_s(masscan->pcap_filename, sizeof(masscan->pcap_filename), value);
     } else if (EQUALS("packet-trace", name) || EQUALS("trace-packet", name)) {
@@ -1068,8 +1378,10 @@ masscan_set_parameter(struct Masscan *masscan,
     } else if (EQUALS("randomize-hosts", name)) {
         /* already do that */
         ;
+    } else if (EQUALS("readrange", name) || EQUALS("readranges", name)) {
+        masscan->op = Operation_ReadRange;
     } else if (EQUALS("reason", name)) {
-        masscan->nmap.reason = 1;
+        masscan->output.is_reason = 1;
     } else if (EQUALS("redis", name)) {
         struct Range range;
         unsigned offset = 0;
@@ -1095,8 +1407,10 @@ masscan_set_parameter(struct Masscan *masscan,
 
         masscan->redis.ip = range.begin;
         masscan->redis.port = port;
-        masscan->nmap.format = Output_Redis;
-        strcpy_s(masscan->nmap.filename, sizeof(masscan->nmap.filename), "<redis>");
+        masscan->output.format = Output_Redis;
+        strcpy_s(masscan->output.filename, 
+                 sizeof(masscan->output.filename), 
+                 "<redis>");
     } else if (EQUALS("release-memory", name)) {
         fprintf(stderr, "nmap(%s): this is our default option\n", name);
     } else if (EQUALS("resume", name)) {
@@ -1113,23 +1427,42 @@ masscan_set_parameter(struct Masscan *masscan,
         } else {
             masscan->retries = x;
         }
-    } else if (EQUALS("rotate-output", name) || EQUALS("rotate", name) || EQUALS("ouput-rotate", name)) {
-        masscan->rotate_output = (unsigned)parseTime(value);
+    } else if (EQUALS("rotate-output", name) || EQUALS("rotate", name) 
+        || EQUALS("ouput-rotate", name) || EQUALS("rotate-time", name) ) {
+        masscan->output.rotate.timeout = (unsigned)parseTime(value);
     } else if (EQUALS("rotate-offset", name) || EQUALS("ouput-rotate-offset", name)) {
-        masscan->rotate_offset = (unsigned)parseTime(value);
+        masscan->output.rotate.offset = (unsigned)parseTime(value);
+    } else if (EQUALS("rotate-size", name) || EQUALS("rotate-filesize", name)) {
+        masscan->output.rotate.filesize = parseSize(value);
     } else if (EQUALS("rotate-dir", name) || EQUALS("rotate-directory", name) || EQUALS("ouput-rotate-dir", name)) {
         char *p;
-        strcpy_s(   masscan->rotate_directory,
-                    sizeof(masscan->rotate_directory),
+        strcpy_s(   masscan->output.rotate.directory,
+                    sizeof(masscan->output.rotate.directory),
                     value);
 
         /* strip trailing slashes */
-        p = masscan->rotate_directory;
+        p = masscan->output.rotate.directory;
         while (*p && (p[strlen(p)-1] == '/' || p[strlen(p)-1] == '/'))
             p[strlen(p)-1] = '\0';
     } else if (EQUALS("script", name)) {
-        fprintf(stderr, "nmap(%s): unsupported, it's too complex for this simple scanner\n", name);
-        exit(1);
+        if (!script_lookup(value)) {
+            fprintf(stderr, "FAIL: script '%s' does not exist\n", value);
+            fprintf(stderr, "  hint: most nmap scripts aren't supported\n");
+            fprintf(stderr, "  hint: use '--script list' to list available scripts\n");
+            exit(1);
+        }
+        if (masscan->script.name != NULL) {
+            if (strcmp(masscan->script.name, value) == 0)
+                return; /* ok */
+            else {
+                fprintf(stderr, "FAIL: only one script supported at a time\n");
+                fprintf(stderr, "  hint: '%s' is existing script, '%s' is new script\n",
+                        masscan->script.name, value);
+                exit(1);
+            }
+        }
+        
+        masscan->script.name = script_lookup(value)->name;
     } else if (EQUALS("scan-delay", name) || EQUALS("max-scan-delay", name)) {
         fprintf(stderr, "nmap(%s): unsupported: we do timing VASTLY differently!\n", name);
         exit(1);
@@ -1150,6 +1483,9 @@ masscan_set_parameter(struct Masscan *masscan,
         exit(1);
     } else if (EQUALS("selftest", name) || EQUALS("self-test", name) || EQUALS("regress", name)) {
         masscan->op = Operation_Selftest;
+        return;
+    } else if (EQUALS("benchmark", name)) {
+        masscan->op = Operation_Benchmark;
         return;
     } else if (EQUALS("source-port", name) || EQUALS("sourceport", name)) {
         masscan_set_parameter(masscan, "adapter-port", value);
@@ -1179,9 +1515,11 @@ masscan_set_parameter(struct Masscan *masscan,
         masscan->shard.of = of;
 
     } else if (EQUALS("no-stylesheet", name)) {
-        masscan->nmap.stylesheet[0] = '\0';
+        masscan->output.stylesheet[0] = '\0';
     } else if (EQUALS("stylesheet", name)) {
-        strcpy_s(masscan->nmap.stylesheet, sizeof(masscan->nmap.stylesheet), value);
+        strcpy_s(masscan->output.stylesheet, 
+                 sizeof(masscan->output.stylesheet), 
+                 value);
     } else if (EQUALS("system-dns", name)) {
         fprintf(stderr, "nmap(%s): DNS lookups will never be supported by this code\n", name);
         exit(1);
@@ -1204,6 +1542,9 @@ masscan_set_parameter(struct Masscan *masscan,
         } else {
             masscan->nmap.ttl = x;
         }
+    } else if (EQUALS("version", name)) {
+        print_version();
+        exit(1);
     } else if (EQUALS("version-intensity", name)) {
         fprintf(stderr, "nmap(%s): unsupported\n", name);
         exit(1);
@@ -1237,17 +1578,21 @@ is_singleton(const char *name)
 {
     static const char *singletons[] = {
         "echo", "selftest", "self-test", "regress",
-        "system-dns", "traceroute", "version-light",
+        "benchmark",
+        "system-dns", "traceroute", "version",
+        "version-light",
         "version-all", "version-trace",
         "osscan-limit", "osscan-guess",
-        "badsum", "reason", "open",
+        "badsum", "reason", "open", "open-only",
         "packet-trace", "release-memory",
         "log-errors", "append-output", "webxml", "no-stylesheet",
         "no-stylesheet",
         "send-eth", "send-ip", "iflist", "randomize-hosts",
         "nmap", "trace-packet", "pfring", "sendq",
-        "banners", "banner", "offline", "ping", "ping-sweep",
+        "banners", "banner", "nobanners", "nobanner",
+        "offline", "ping", "ping-sweep",
         "arp",  "infinite", "interactive",
+        "read-range", "read-ranges", "readrange", "read-ranges",
         0};
     size_t i;
 
@@ -1310,11 +1655,14 @@ masscan_command_line(struct Masscan *masscan, int argc, char *argv[])
          * -- name value
          */
         if (argv[i][0] == '-' && argv[i][1] == '-') {
-            if (strcmp(argv[i], "--help") == 0)
+            if (strcmp(argv[i], "--help") == 0) {
                 masscan_help();
-            else if (EQUALS("readscan", argv[i]+2)) {
+            } else if (EQUALS("readscan", argv[i]+2)) {
                 /* Read in a binary file instead of scanning the network*/
                 masscan->op = Operation_ReadScan;
+                
+                /* Default to reading banners */
+                masscan->is_banners = 1;
 
                 /* This option may be followed by many filenames, therefore,
                  * skip forward in the argument list until the next
@@ -1444,41 +1792,38 @@ masscan_command_line(struct Masscan *masscan, int argc, char *argv[])
                 /* Do nothing: this code never does DNS lookups anyway */
                 break;
             case 'o': /* nmap output format */
-                masscan->is_interactive = 0;
                 switch (argv[i][2]) {
                 case 'A':
-                    masscan->nmap.format = Output_All;
+                    masscan->output.format = Output_All;
                     fprintf(stderr, "nmap(%s): unsupported output format\n", argv[i]);
                     exit(1);
                     break;
                 case 'B':
-                    masscan->nmap.format = Output_Binary;
+                    masscan->output.format = Output_Binary;
                     break;
                 case 'J':
-                    masscan->nmap.format = Output_JSON;
+                    masscan->output.format = Output_JSON;
                     break;
                 case 'N':
-                    masscan->nmap.format = Output_Nmap;
+                    masscan->output.format = Output_Nmap;
                     fprintf(stderr, "nmap(%s): unsupported output format\n", argv[i]);
                     exit(1);
                     break;
                 case 'X':
-                    masscan->nmap.format = Output_XML;
+                    masscan->output.format = Output_XML;
                     break;
                 case 'R':
-                    masscan->nmap.format = Output_Redis;
+                    masscan->output.format = Output_Redis;
                     if (i+1 < argc && argv[i+1][0] != '-')
                         masscan_set_parameter(masscan, "redis", argv[i+1]);
                     break;
                 case 'S':
-                    masscan->nmap.format = Output_ScriptKiddie;
+                    masscan->output.format = Output_ScriptKiddie;
                     fprintf(stderr, "nmap(%s): unsupported output format\n", argv[i]);
                     exit(1);
                     break;
                 case 'G':
-                    masscan->nmap.format = Output_Grepable;
-                    fprintf(stderr, "nmap(%s): unsupported output format\n", argv[i]);
-                    exit(1);
+                    masscan->output.format = Output_Grepable;
                     break;
                 case 'L':
                     masscan_set_parameter(masscan, "output-format", "list");
@@ -1489,7 +1834,7 @@ masscan_command_line(struct Masscan *masscan, int argc, char *argv[])
                 }
 
                 ++i;
-                if (i >= argc || argv[i][0] == '-') {
+                if (i >= argc || (argv[i][0] == '-' && argv[i][1] != '\0')) {
                     fprintf(stderr, "missing output filename\n");
                     exit(1);
                 }
@@ -1527,10 +1872,12 @@ masscan_command_line(struct Masscan *masscan, int argc, char *argv[])
                 fprintf(stderr, "nmap(%s): unsupported. This code will never do DNS lookups.\n", argv[i]);
                 exit(1);
                 break;
-            case 's':
+            case 's': /* NMAP: scan type */
                 if (argv[i][3] == '\0' && !isdigit(argv[i][2]&0xFF)) {
-                    /* This looks like an nmap option*/
-                    switch (argv[i][2]) {
+                    unsigned j;
+
+                    for (j=2; argv[i][j]; j++)
+                    switch (argv[i][j]) {
                     case 'A':
                         fprintf(stderr, "nmap(%s): ACK scan not yet supported\n", argv[i]);
                         exit(1);
@@ -1558,14 +1905,14 @@ masscan_command_line(struct Masscan *masscan, int argc, char *argv[])
                     case 'O':
                         fprintf(stderr, "nmap(%s): IP proto scan not yet supported\n", argv[i]);
                         exit(1);
-                    case 'S': /* SYN scan - THIS IS WHAT WE DO! */
+                    case 'S': /* TCP SYN scan - THIS IS WHAT WE DO! */
                         break;
-                    case 'T':
+                    case 'T': /* TCP connect scan */
                         fprintf(stderr, "nmap(%s): connect() is too synchronous for cool kids\n", argv[i]);
-                        exit(1);
-                    case 'U':
-                        fprintf(stderr, "nmap(%s): UDP scan not yet supported\n", argv[i]);
-                        exit(1);
+                        fprintf(stderr, "WARNING: doing SYN scan anyway\n");
+                        break;
+                    case 'U': /* UDP scan */
+                        break;
                     case 'V':
                         fprintf(stderr, "nmap(%s): unlikely this will be supported\n", argv[i]);
                         exit(1);
@@ -1576,8 +1923,7 @@ masscan_command_line(struct Masscan *masscan, int argc, char *argv[])
                         fprintf(stderr, "nmap(%s): Xmas scan not yet supported\n", argv[i]);
                         exit(1);
                     case 'Y':
-                        fprintf(stderr, "nmap(%s): SCTP scan not yet supported\n", argv[i]);
-                        exit(1);
+                        break;
                     case 'Z':
                         fprintf(stderr, "nmap(%s): SCTP scan not yet supported\n", argv[i]);
                         exit(1);
@@ -1606,7 +1952,7 @@ masscan_command_line(struct Masscan *masscan, int argc, char *argv[])
                 }
                 break;
             case 'V': /* print version and exit */
-                exit(1);
+                masscan_set_parameter(masscan, "version", "");
                 break;
             case 'W':
                 masscan->op = Operation_List_Adapters;

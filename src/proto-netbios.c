@@ -58,7 +58,7 @@ append_name(unsigned char *banner, size_t banner_max, unsigned *banner_length, c
  * Process one of them many "resource-records" within the NBTSTAT response
  *****************************************************************************/
 static unsigned
-handle_nbtstat_rr(struct Output *out, time_t timestamp,
+handle_nbtstat_rr(struct Output *out, time_t timestamp, unsigned ttl,
                   const unsigned char *px, unsigned length,
                   unsigned ip_them, unsigned port_them)
 {
@@ -98,6 +98,7 @@ handle_nbtstat_rr(struct Output *out, time_t timestamp,
             out, timestamp,
             ip_them, 17, port_them,
             PROTO_NBTSTAT,
+            ttl,
             banner, banner_length);
     return 0;
 }
@@ -107,7 +108,10 @@ handle_nbtstat_rr(struct Output *out, time_t timestamp,
 /***************************************************************************
  ***************************************************************************/
 unsigned
-handle_nbtstat(struct Output *out, time_t timestamp, const unsigned char *px, unsigned length, struct PreprocessedInfo *parsed)
+handle_nbtstat(struct Output *out, time_t timestamp,
+    const unsigned char *px, unsigned length, 
+    struct PreprocessedInfo *parsed,
+    uint64_t entropy)
 {
     unsigned ip_them;
     unsigned ip_me;
@@ -122,7 +126,7 @@ handle_nbtstat(struct Output *out, time_t timestamp, const unsigned char *px, un
     ip_me = parsed->ip_dst[0]<<24 | parsed->ip_dst[1]<<16
             | parsed->ip_dst[2]<< 8 | parsed->ip_dst[3]<<0;
 
-    seqno = (unsigned)syn_cookie(ip_them, port_them | Templ_UDP, ip_me, port_me);
+    seqno = (unsigned)syn_cookie(ip_them, port_them | Templ_UDP, ip_me, port_me, entropy);
 
     proto_dns_parse(dns, px, parsed->app_offset, parsed->app_offset + parsed->app_length);
 
@@ -159,7 +163,7 @@ handle_nbtstat(struct Output *out, time_t timestamp, const unsigned char *px, un
 
         offset += 10;
 
-        return handle_nbtstat_rr(out, timestamp,
+        return handle_nbtstat_rr(out, timestamp, parsed->ip_ttl,
                                     px + offset,
                                     length - offset,
                                     ip_them,
